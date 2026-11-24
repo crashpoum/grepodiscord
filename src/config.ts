@@ -35,5 +35,23 @@ export const config = {
   geminiModel: env.GEMINI_MODEL ?? '',
   geminiRpm: num(env.GEMINI_RPM, 8),
   geminiRpd: num(env.GEMINI_RPD, 400),
+  /**
+   * Live window / world map web app (Discord Activity + browser dashboard). Served by the bot process on WEB_PORT;
+   * started only when PUBLIC_URL or ACTIVITY_CLIENT_ID is set (or WEB_ENABLED=true). See SETUP-ACTIVITY.md.
+   */
+  publicUrl: (env.PUBLIC_URL ?? '').trim().replace(/\/+$/, ''),
+  webPort: num(env.WEB_PORT, 8080),
+  webEnabled: env.WEB_ENABLED === 'true' || !!(env.PUBLIC_URL || env.ACTIVITY_CLIENT_ID),
+  /** HMAC secret for dashboard links/sessions; auto-generated and stored in the DB when empty. */
+  webSecret: env.WEB_SECRET ?? '',
+  /** The SEPARATE Discord application that hosts the Activity (never the bot's own app). */
+  activityClientId: env.ACTIVITY_CLIENT_ID ?? '',
+  activityClientSecret: env.ACTIVITY_CLIENT_SECRET ?? '',
+  /** Optional Custom Link from the Activity app's portal; default https://discord.com/activities/<ACTIVITY_CLIENT_ID>. */
+  activityLink: (env.ACTIVITY_LINK ?? '').trim(),
+  /** Live window: seconds between command-share polls, and the share of the GrepoData budget it may use. */
+  livePollSeconds: Math.max(10, num(env.LIVE_POLL_SECONDS, 20)),
+  liveRpm: Math.max(2, num(env.LIVE_RPM, 12)),
+  privacyContact: env.PRIVACY_CONTACT ?? '',
   logLevel: env.LOG_LEVEL ?? 'info',
 };

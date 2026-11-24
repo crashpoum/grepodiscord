@@ -393,6 +393,17 @@ export class Store implements FileStore {
       }])),
     };
   }
+  /** Towns per alliance per stored day (for the map timeline chart), limited to `ids`. */
+  allianceTownsHistory(world: string, ids: number[]): Record<string, Record<number, number>> {
+    const out: Record<string, Record<number, number>> = {};
+    if (!ids.length) return out;
+    const want = new Set(ids);
+    for (const r of this.db.prepare('SELECT day, alliance_id, towns FROM alliance_daily WHERE world = ? ORDER BY day').all(world) as { day: string; alliance_id: number; towns: number }[]) {
+      if (!want.has(Number(r.alliance_id))) continue;
+      (out[r.day] ??= {})[Number(r.alliance_id)] = Number(r.towns);
+    }
+    return out;
+  }
   playerSeries(world: string, playerId: number): (DailyRow & { day: string })[] {
     return (this.db.prepare('SELECT * FROM player_daily WHERE world = ? AND player_id = ? ORDER BY day').all(world, playerId) as Record<string, unknown>[]).map((r) => ({
       day: String(r.day), id: playerId, allianceId: r.alliance_id == null ? null : Number(r.alliance_id), points: Number(r.points), abp: Number(r.abp), dbp: Number(r.dbp), towns: Number(r.towns),

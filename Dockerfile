@@ -12,6 +12,8 @@ RUN npm ci --foreground-scripts \
 FROM deps AS compile
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
+COPY web ./web
+COPY scripts/build-web.mjs ./scripts/build-web.mjs
 RUN npm run build && npm prune --omit=dev
 
 FROM node:24-bookworm-slim

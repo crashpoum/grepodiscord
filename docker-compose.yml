@@ -10,7 +10,27 @@ services:
       DB_PATH: /app/data/grepocord.sqlite
     volumes:
       - ./data:/app/data
-    # No ports exposed: the bot only makes outbound connections (Discord gateway, grepolis.com, grepodata.com).
+    # No host ports: the live window web app (WEB_PORT, default 8080) is only reachable inside the compose network,
+    # where the cloudflared service below publishes it through a Cloudflare named tunnel (outbound only).
+    expose: ["8080"]
+    # To test the web app on this machine only, uncomment:
+    # ports: ["127.0.0.1:8080:8080"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Cloudflare named tunnel for the live window / Activity (see SETUP-ACTIVITY.md).
+  # Enabled with COMPOSE_PROFILES=tunnel in .env (or: docker compose --profile tunnel up -d).
+  # In the Cloudflare dashboard, point the tunnel's public hostname to http://bot:8080
+  cloudflared:
+    image: docker.io/cloudflare/cloudflared:latest
+    container_name: grepocord-tunnel
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on: [bot]
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

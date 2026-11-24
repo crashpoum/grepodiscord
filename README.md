@@ -25,6 +25,7 @@ MIT licensed. TypeScript, discord.js v14, SQLite via Node's built-in `node:sqlit
 | Quit prediction | `/quitrisk [player] [alliance] [near_town] [radius] [min_points]` · optional board section via `/warroom options quitters:true` | Score from idle time, points trend, BP trend, towns lost vs taken (7 days) and alliance status, with a confidence % |
 | AI reports (Gemini free tier) | `/report parse [text] [image] [town] [private]` (no input = paste box) · right-click a message → Apps → **Parse report** · `/report search town [kind] [page]` · `/report show id` · `/report delete id` | Gemini reads a pasted report or screenshot into units/losses/buildings/resources; stored per Discord server and searchable by town |
 | Weekly newspaper (admins) | `/newspaper channel channel [day] [hour]` · `/newspaper preview` · `/newspaper post` · `/newspaper status` · `/newspaper off` | Conquests, wars, risers/fallers and our alliance's week, written by Gemini in the server language; template summary without a key |
+| Live window & world map | `/live [share]` · `/map [share]` (GR: `/ζωντανά`, `/χάρτης`) | GrepoData shared commands with countdowns, latest intel, and an interactive world map (our side vs enemies) with a conquest timeline. Opens as a Discord Activity (separate app) or a personal browser link. Setup: [SETUP-ACTIVITY.md](SETUP-ACTIVITY.md) |
 | Settings | `/setup world` · `/setup language en\|el` · `/setup show` · `/help` | |
 
 Everything is in English and Greek. Bot replies follow `/setup language`. Command, subcommand, option and choice **names and descriptions** are localized with Discord's `el` locale, so members whose Discord is in Greek see e.g. `/κορυφαίοι σήμερα` or `/πόλη ραντάρ`. A test enforces that every command element has a Greek name and description and that the EN/GR string tables match.
@@ -53,6 +54,13 @@ Intel comes from your **GrepoData account** (the one you use on grepodata.com wi
   - **Estimate:** without `travel:`, the bot estimates from the map (`50 × distance_px / speed + 900 / world speed`, speeds from the world's `units.json` with meteorology/cartography/lighthouse/boost applied; land units on another island travel at the speed of their boats). Town positions inside an island are not public, so this is shown as **≈ ± a few minutes**. Use `travel:` for real ops.
   - The anti-timing rule (±10 s on every command) still applies in game.
 
+## Live window & world map (Activity / browser)
+- `/live` and `/map` open a small web app served by the bot container (`src/web`, bundle in `web/`). It runs inside Discord as an **Activity** of a *separate* Discord application, so the main bot is never touched by Activity rules. It also runs as a plain browser dashboard: a personal signed link (12 h) or *Sign in with Discord*.
+- It is published through a **Cloudflare named tunnel** (`cloudflared` compose service, `CLOUDFLARE_TUNNEL_TOKEN`). No ports are opened.
+- Unverified Activities only work in servers under 25 members, and only for the dev team and App Testers. Big servers use the browser link until the Activity app is verified.
+- GrepoData is polled once per server while someone is watching, cached server-side, and fanned out to all viewers, capped by `LIVE_RPM` (default 12/min, within `GREPODATA_RPM`).
+- Full step-by-step guide for the Discord portal and Cloudflare: **[SETUP-ACTIVITY.md](SETUP-ACTIVITY.md)**.
+
 ## AI features (Gemini, free tier only)
 - **Key.** Create one at https://aistudio.google.com/apikey in a Google project **without billing**. Such a project stays on the free tier and cannot be charged. Put it in `.env` as `GEMINI_API_KEY`. No key: `/report` answers with a clear message and the newspaper uses a template.
 - **Model.** Default `gemini-3.5-flash-lite` (text + images, free tier). `GEMINI_MODEL` accepts only free-tier flash models; pro/paid models are refused and replaced by the default.
@@ -79,6 +87,7 @@ Roles: `/roles verified` sets a role for every linked member, and `/roles allian
   - per-endpoint caching: 10 min for info and scoreboards, 15 min for changes and conquests, 30 min for rankings and towns, 60 min for history and wars, 5 min for intel, 6 h for the world list
   - request de-duplication, stale-if-error, and exponential backoff with a global pause on 429/503
   - 4xx responses are never retried, which matters for 401s with their fail2ban
+  - the live window polls command share only while someone is watching, once per server for all viewers, capped at `LIVE_RPM` (default 12/min) inside the shared budget
 
 ## Architecture
 ```
@@ -99,8 +108,10 @@ src/
   time.ts              world-local time → Discord timestamps
   dbPath.ts            grepodiscord.sqlite → grepocord.sqlite migration
   db.ts                SQLite store (node:sqlite)
-  bot/                 commands (+ commandsEl.ts Greek names), handlers, gdHandlers, poster, scheduler, tokenCare
+  bot/                 commands (+ commandsEl.ts Greek names), handlers, gdHandlers, poster, scheduler, tokenCare, webHandlers (/live /map)
+  web/                 web app server: auth.ts (signed sessions, Discord OAuth), live.ts (cached command share), mapData.ts, server.ts, pages.ts
   index.ts register.ts cli.ts
+web/                   browser/Activity client (Embedded App SDK 2.5, canvas map) → bundled by esbuild into compiled/public
 ```
 **Why SQLite?** A private alliance bot writes a few rows an hour. `node:sqlite` is built into Node ≥ 22.13, so there is no native DB module to compile, no DB container, and backups are a single file (`data/grepocord.sqlite`). It stores guild config, feeds, links, pending codes, GrepoData tokens per server, the last version of each world file (gzipped, for diffs), and per-player activity. For a big public deployment, swap `src/db.ts` for PostgreSQL behind the same methods.
 
@@ -205,6 +216,7 @@ npm run cli -- intel gr125 town "ZAGAN 14"         # uses GREPODATA_TOKEN from t
 npm run smoke                                     # drives the real handlers with fake interactions
 npm run smoke:batch1                              # war room, alerts, op planner (live gr125 data, fake Discord)
 npm run smoke:batch2                              # soft targets, quit risk, reports, newspaper (fake Gemini unless SMOKE_GEMINI=1)
+npm run smoke:web                                 # web app on :8099 with live world data + fake command share; prints signed links
 ```
 The CLI keeps its own DB (`CLI_DB_PATH`, default `./data/cli.sqlite`). Run `refresh` again after the next hourly file update to see real alliance-change and BP diffs. With Docker: `docker compose run --rm cli refresh gr126`.
 
@@ -212,7 +224,7 @@ The CLI keeps its own DB (`CLI_DB_PATH`, default `./data/cli.sqlite`). Run `refr
 ```bash
 npm run typecheck   # tsc (src + tests)
 npm test            # vitest: parsers, diffs, feeds, radar, verification, roles, limiter, GrepoData client/auth/views, Greek command localization, i18n, store
-npm run build       # → compiled/
+npm run build       # → compiled/ (+ web bundle in compiled/public)
 ```
 
 ## Known limits
@@ -226,3 +238,6 @@ npm run build       # → compiled/
 - GrepoData's public API is undocumented and could change. Lookups fall back to official data (without charts) if it fails.
 - GrepoData's `/town/radar` is centred on a town. For x/y coordinates the bot uses the nearest town as the anchor and filters by island distance itself.
 - Intel requires a GrepoData account that is a member of the relevant City Indexer teams. The bot only shows what that account can see.
+- The live window shows what the server's GrepoData account sees in its command-share teams for the world (up to 3 teams), refreshed every `LIVE_POLL_SECONDS`. It is not a game feed.
+- The map timeline replays the official conquers file backwards from today's owners. Towns founded later still appear at earlier times, and alliance switches without a conquest are not replayed.
+- The Discord Activity needs Discord's verification for servers with 25+ members. Until then, use the browser link (SETUP-ACTIVITY.md §5).

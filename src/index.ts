@@ -12,6 +12,7 @@ import { handleButton } from './bot/warPoster.js';
 import { seedEnvToken } from './gdAuth.js';
 import { Gemini } from './ai/gemini.js';
 import { handleReportContext, handleReportModal } from './bot/aiHandlers.js';
+import { startWebServer } from './web/server.js';
 
 if (!config.discordToken) {
   console.error('DISCORD_TOKEN is not set. For a token-free dry run use: npm run cli -- --help');
@@ -28,11 +29,17 @@ seedEnvToken(store);
 // Guilds intent only: no privileged intents (no message content, no member list scraping).
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// Live window / map web app (Activity + dashboard), only when configured. Shares the store, caches and GrepoData budget.
+const web = config.webEnabled
+  ? startWebServer(ctx, { has: (id) => client.guilds.cache.has(id), name: (id) => client.guilds.cache.get(id)?.name ?? null })
+  : null;
+if (!web) log.info('web: live window disabled (set PUBLIC_URL and/or ACTIVITY_CLIENT_ID to enable)');
+
 client.once(Events.ClientReady, (c) => {
   log.info(`Logged in as ${c.user.tag} in ${c.guilds.cache.size} guild(s); tracking ${store.trackedWorlds().join(', ') || 'no worlds yet'}`);
   void ctx.gd.activeWorlds(config.markets).catch(() => undefined); // warm world list cache for autocomplete
   const stop = startScheduler(c, ctx);
-  const shutdown = () => { log.info('shutting down'); stop(); void c.destroy().finally(() => process.exit(0)); };
+  const shutdown = () => { log.info('shutting down'); stop(); web?.close(); void c.destroy().finally(() => process.exit(0)); };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
 });

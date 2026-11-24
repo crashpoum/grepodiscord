@@ -39,6 +39,19 @@ export interface GdAuthTokens { access_token: string; refresh_token: string; exp
 export interface GdIntelUnit { name: string; count: string | number; killed?: string | number }
 /** One formatted intel report of a town (dates are world-local "DD-MM-YY HH:MM:SS"). */
 export interface GdIntelRecord { id: number; date: string; type?: string; units?: GdIntelUnit[]; silver?: string; wall?: string | number; hero?: string; god?: string; deleted?: boolean; cost?: number }
+export interface GdActiveTeams { success?: boolean; active?: number; operations?: { active?: boolean; index: string; team?: string; world: string; commands?: number; players?: number }[] }
+export interface GdSharedCommand {
+  es_id: string; arrival_at: number; started_at?: number; type?: string; subtype?: string;
+  src_twn_id?: number; src_twn_n?: string; src_ply_id?: number; src_ply_n?: string; src_all_id?: number; src_all_n?: string;
+  trg_twn_id?: number; trg_twn_n?: string; trg_ply_id?: number; trg_ply_n?: string; trg_all_id?: number; trg_all_n?: string;
+  units?: Record<string, number | string> | string; upload_n?: string; own_command?: boolean; return?: boolean; delete_status?: string; cancel_human?: string; comments?: unknown[]; is_planned?: boolean;
+}
+export interface GdTeamCommands { success?: boolean; success_code?: number; count?: number; updated_at?: number; is_admin?: boolean; items?: GdSharedCommand[] }
+export interface GdIndexOverview {
+  success?: boolean; index_name?: string; world?: string; total_reports?: number; spy_reports?: number; enemy_attacks?: number; friendly_attacks?: number; latest_report?: string;
+  latest_intel?: { town_id?: number; town_name?: string; player_id?: number; player_name?: string; alliance_id?: number; date?: string; type?: string; [k: string]: unknown }[];
+  recent_conquests?: { town_id?: number; town_name?: string; [k: string]: unknown }[];
+}
 export interface GdTownIntel { world?: string; town_id?: number | string; name: string; ix: number; iy: number; player_id: number; player_name: string; alliance_id?: number; has_intel?: boolean; intel: GdIntelRecord[]; notes?: { message?: string; poster_name?: string; date?: string }[]; teams?: unknown[] }
 /** /indexer/v2/player|alliance: categories keyed by player id (PHP assoc arrays → objects). */
 export interface GdBrowseIntel { info?: { player_name?: string; player_id?: number; alliance_id?: number; alliance_name?: string }; cities?: unknown; off?: unknown; def?: unknown; myth?: unknown; fire?: unknown; bir?: unknown; trir?: unknown; teams?: unknown[]; view_is_limited?: boolean }
@@ -171,5 +184,18 @@ export class GrepoDataClient {
   }
   intelAlliance(token: string, scope: string, world: string, allianceId: number) {
     return this.getJson<GdBrowseIntel>('/indexer/v2/alliance', { world, alliance_id: allianceId }, TTL.intel, { headers: { access_token: token }, cacheScope: scope });
+  }
+  // ---- Command share / index overview for the live window (token-scoped, short TTLs; callers keep their own budget).
+  /** Teams (operations) the token's account belongs to. `index` is the team key used by commandsGet/indexOverview. */
+  commandTeams(token: string, scope: string) {
+    return this.getJson<GdActiveTeams>('/commands/activeteams', {}, 60_000, { headers: { access_token: token }, cacheScope: scope });
+  }
+  /** Shared commands of one team; with `since` (unix s) only commands changed since then (success_code 8010 = nothing new). */
+  commandsGet(token: string, scope: string, team: string, since = 0) {
+    return this.getJson<GdTeamCommands>('/commands/get', { team, last_get_cmd: since }, 5_000, { headers: { access_token: token }, cacheScope: scope });
+  }
+  /** Overview of one index (latest intel, recent conquests, totals). */
+  indexOverview(token: string, scope: string, key: string) {
+    return this.getJson<GdIndexOverview>('/indexer/v2/getindex', { key }, 2 * MIN, { headers: { access_token: token }, cacheScope: scope });
   }
 }

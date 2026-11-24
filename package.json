@@ -1,11 +1,11 @@
 {
   "name": "grepocord",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Grepolis Discord bot (v1): lookups, feeds, radar, verification",
   "main": "compiled/index.js",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
-    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p web/tsconfig.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-web.mjs",
     "test": "vitest run",
     "start": "node --disable-warning=ExperimentalWarning compiled/index.js",
     "register": "node --disable-warning=ExperimentalWarning compiled/register.js",
@@ -14,7 +14,9 @@
     "cli:dev": "tsx src/cli.ts",
     "smoke": "tsx scripts/smoke-handlers.ts",
     "smoke:batch1": "tsx scripts/smoke-batch1.ts",
-    "smoke:batch2": "tsx scripts/smoke-batch2.ts"
+    "smoke:batch2": "tsx scripts/smoke-batch2.ts",
+    "build:web": "node scripts/build-web.mjs",
+    "smoke:web": "tsx scripts/smoke-web.ts"
   },
   "license": "MIT",
   "type": "module",
@@ -25,7 +27,9 @@
     "discord.js": "^14.28.1"
   },
   "devDependencies": {
+    "@discord/embedded-app-sdk": "^2.5.0",
     "@types/node": "^24.19.2",
+    "esbuild": "^0.28.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.1.1"

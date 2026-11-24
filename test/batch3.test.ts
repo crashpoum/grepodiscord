@@ -1,0 +1,267 @@
+import { describe, expect, it } from 'vitest';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { Store } from '../src/db.js';
+import { buildSnapshot } from '../src/data/snapshot.js';
+import { GrepoDataClient, type GdSharedCommand } from '../src/data/grepodata.js';
+import { config } from '../src/config.js';
+import { issueSession, sign, verify, webSecret, bearer } from '../src/web/auth.js';
+import { activeCommands, Budget, LiveHub, normUnits } from '../src/web/live.js';
+import { buildMapPayload } from '../src/web/mapData.js';
+import { createWebApp, dashboardLink } from '../src/web/server.js';
+import { activityUrl, launchPlan } from '../src/bot/webHandlers.js';
+import { ownerAtTime, townXY, allianceColor } from '../web/src/geo.js';
+import { WEB_STRINGS, wt } from '../src/web/strings.js';
+import { STRINGS } from '../src/i18n.js';
+import { commandJson } from '../src/bot/commands.js';
+import type { Ctx } from '../src/services.js';
+import type { WorldManager } from '../src/refresh.js';
+import { files } from './helpers.js';
+
+const NOW = 1_800_000_000;
+const D = 86400;
+const jwt = (p: object) => `x.${Buffer.from(JSON.stringify(p)).toString('base64url')}.y`;
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+function world() {
+  return buildSnapshot('gr999', files({
+    players: ['1,Alice,10,5000,1,2', '2,Bob,20,3000,2,1'].join('\n'),
+    alliances: ['10,Red,5000,2,1,1', '20,Blue,3000,1,1,2'].join('\n'),
+    towns: ['100,1,Alice+1,450,530,1,6000', '101,1,Alice+2,460,540,2,4000', '200,2,Bob+1,452,533,3,9000', '600,,Ghost,453,534,8,1200'].join('\n'),
+    conquers: [`101,${NOW - 3 * D},1,2,10,20,4000`, `101,${NOW - 10 * D},2,0,20,0,3000`].join('\n'),
+    player_kills_att: '1,1,9000', player_kills_def: '1,1,6000',
+  }));
+}
+
+function ctxWith(fetchImpl: typeof fetch): Ctx {
+  const store = new Store(':memory:');
+  const sn = world();
+  const worlds = { ensure: async () => sn, get: () => sn } as unknown as WorldManager;
+  store.setGuild({ guildId: 'g1', world: 'gr999', lang: 'el', verifiedRoleId: null });
+  return { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fetchImpl, async () => {}) } as Ctx;
+}
+const withToken = (c: Ctx) => {
+  const exp = Date.now() + 3_600_000;
+  c.store.setGdToken({ guildId: 'g1', accessToken: jwt({ exp: Math.floor(exp / 1000) }), refreshToken: null, accessExp: exp, refreshExp: null, adminUserId: null, source: 'command' });
+};
+
+describe('web sessions', () => {
+  it('signs, verifies, rejects tampering and expiry', () => {
+    const tok = issueSession('s'.repeat(32), { u: 'u1', g: 'g1' }, 1, 1000);
+    expect(verify(tok, 's'.repeat(32), 2000)).toMatchObject({ u: 'u1', g: 'g1' });
+    expect(verify(tok, 's'.repeat(32), 1000 + 3_600_001)).toBeNull();
+    expect(verify(tok, 'other-secret-xxxxxxxx', 2000)).toBeNull();
+    const [body, mac] = tok.split('.');
+    const forged = `${Buffer.from(JSON.stringify({ u: 'u1', g: 'g2', exp: 9e15 })).toString('base64url')}.${mac}`;
+    expect(verify(forged, 's'.repeat(32), 2000)).toBeNull();
+    expect(verify(`${body}.`, 's'.repeat(32), 2000)).toBeNull();
+    expect(verify(sign({ exp: 'x' }, 'k'), 'k')).toBeNull();
+    expect(bearer('Bearer abc.def')).toBe('abc.def');
+    expect(bearer('Basic x')).toBeNull();
+  });
+  it('generates one secret and keeps it in the DB; WEB_SECRET wins', () => {
+    const store = new Store(':memory:');
+    const a = webSecret(store, '');
+    expect(a.length).toBeGreaterThan(30);
+    expect(webSecret(store, '')).toBe(a);
+    expect(webSecret(store, 'x'.repeat(20))).toBe('x'.repeat(20));
+  });
+  it('dashboard links put the session in the fragment', () => {
+    const old = config.publicUrl;
+    config.publicUrl = 'https://live.example.com';
+    const l = dashboardLink('k'.repeat(32), 'g1', 'u1', 'Al', 'map', 12, 1000)!;
+    expect(l.startsWith('https://live.example.com/map#s=')).toBe(true);
+    expect(verify(l.split('#s=')[1], 'k'.repeat(32), 2000)).toMatchObject({ g: 'g1', u: 'u1', k: 'link' });
+    config.publicUrl = '';
+    expect(dashboardLink('k', 'g', 'u', 'n', 'live', 1)).toBeNull();
+    config.publicUrl = old;
+  });
+});
+
+describe('/live and /map launch', () => {
+  it('builds the Activity link with custom_id and refuses foreign hosts', () => {
+    expect(activityUrl('map', 'https://discord.com/activities/?link_id=0-123')).toBe('https://discord.com/activities/?link_id=0-123&custom_id=map');
+    expect(activityUrl('live', 'https://evil.example/?x')).toBeNull();
+    expect(activityUrl('live', '')).toBeNull();
+    expect(activityUrl('live', 'https://discord.com/activities/42')).toBe('https://discord.com/activities/42?custom_id=live');
+  });
+  it('chooses shared / private / none', () => {
+    expect(launchPlan('live', false, { activity: null, browser: null }).kind).toBe('none');
+    expect(launchPlan('live', true, { activity: 'a', browser: 'b' }).kind).toBe('shared');
+    expect(launchPlan('live', true, { activity: null, browser: 'b' })).toEqual({ kind: 'private', note: 'web.shareNoActivity' });
+    expect(launchPlan('map', false, { activity: 'a', browser: null })).toEqual({ kind: 'private', note: null });
+  });
+  it('registers /live and /map with Greek names', () => {
+    const cmds = commandJson() as { name: string; name_localizations?: Record<string, string> }[];
+    expect(cmds.find((c) => c.name === 'live')?.name_localizations?.el).toBe('ζωντανά');
+    expect(cmds.find((c) => c.name === 'map')?.name_localizations?.el).toBe('χάρτης');
+  });
+  it('has every web string in English and Greek', () => {
+    expect(Object.keys(WEB_STRINGS.el).sort()).toEqual(Object.keys(WEB_STRINGS.en).sort());
+    for (const k of Object.keys(STRINGS.en).filter((x) => x.startsWith('web.'))) expect(STRINGS.el[k as keyof typeof STRINGS.el]).not.toBe(STRINGS.en[k as keyof typeof STRINGS.en]);
+    expect(wt('el', 'updated', { s: 5 })).toBe('Ενημέρωση πριν 5δ');
+  });
+});
+
+describe('live hub', () => {
+  const cmd = (id: string, arrival: number, extra: Partial<GdSharedCommand> = {}): GdSharedCommand =>
+    ({ es_id: id, arrival_at: arrival, type: 'attack', src_all_id: 20, src_twn_n: 'Bob 1', trg_all_id: 10, trg_twn_n: 'Alice 1', units: '{"sword":10,"slinger":0}', ...extra });
+  it('normalizes units and filters/sorts commands', () => {
+    expect(normUnits('{"sword":10,"slinger":0}')).toEqual([['sword', 10]]);
+    expect(normUnits([{ name: 'hoplite', count: '5' }])).toEqual([['hoplite', 5]]);
+    const out = activeCommands([cmd('b', NOW + 50), cmd('a', NOW + 10), cmd('old', NOW - 120), cmd('del', NOW + 5, { delete_status: 'hard' }), cmd('o', NOW + 20, { src_all_id: 10, trg_all_id: 20 })], new Set([10]), NOW);
+    expect(out.map((c) => c.id)).toEqual(['a', 'o', 'b']);
+    expect(out[0].side).toBe('in');
+    expect(out[1].side).toBe('out');
+  });
+  it('budget caps requests per minute', () => {
+    let t = 0;
+    const b = new Budget(2, () => t);
+    expect(b.take()).toBe(true); expect(b.take()).toBe(true); expect(b.take()).toBe(false);
+    t = 61_000;
+    expect(b.take()).toBe(true);
+  });
+  it('polls with the guild token, merges incremental pulls and fans out one snapshot', async () => {
+    const calls: string[] = [];
+    let nowMs = NOW * 1000;
+    const fetchImpl = (async (u: string, init?: RequestInit) => {
+      const url = String(u);
+      calls.push(url.replace('https://gd', ''));
+      expect((init?.headers as Record<string, string>).access_token).toBeTruthy();
+      if (url.includes('/commands/activeteams')) return json({ success: true, operations: [{ index: 'abcd1234', team: 'Red ops', world: 'gr999', players: 3 }, { index: 'zzzz9999', world: 'gr1' }] });
+      if (url.includes('/commands/get')) {
+        return url.includes('last_get_cmd=0')
+          ? json({ success: true, success_code: 8000, updated_at: NOW, items: [cmd('a', NOW + 100), cmd('b', NOW + 200)] })
+          : json({ success: true, success_code: 8000, updated_at: NOW + 20, items: [cmd('b', NOW + 200, { delete_status: 'hard' }), cmd('c', NOW + 300)] });
+      }
+      if (url.includes('/indexer/v2/getindex')) return json({ total_reports: 7, spy_reports: 2, enemy_attacks: 3, latest_intel: [{ town_id: 200, town_name: 'Bob 1', player_name: 'Bob', date: '01-01-27 10:00:00', units: [{ name: 'sword', count: 4 }] }] });
+      return json({}, 404);
+    }) as typeof fetch;
+    const c = ctxWith(fetchImpl);
+    withToken(c);
+    const hub = new LiveHub(c, async () => [10], { pollSeconds: 20, rpm: 10, now: () => nowMs });
+    const first = await hub.view('g1', 'en'); // marks a viewer
+    expect(first.warming).toBe(true);
+    hub.stop();
+    await hub.tick('g1');
+    let v = await hub.view('g1', 'en');
+    hub.stop();
+    expect(v.teams).toEqual([{ key: 'abcd1234', name: 'Red ops', commands: 0, players: 3 }]);
+    expect(v.commands.map((x) => x.id)).toEqual(['a', 'b']);
+    expect(v.commands[0].side).toBe('in');
+    expect(v.stats).toEqual({ reports: 7, spies: 2, attacks: 3 });
+    expect(v.intel[0]).toMatchObject({ town: 'Bob 1', units: [['sword', 4]] });
+    nowMs += 20_000;
+    await hub.tick('g1');
+    v = await hub.view('g1', 'en');
+    hub.stop();
+    expect(v.commands.map((x) => x.id)).toEqual(['a', 'c']);
+    expect(calls.filter((x) => x.includes('activeteams'))).toHaveLength(1); // teams cached 5 min
+    expect(calls.filter((x) => x.includes('getindex'))).toHaveLength(1); // overview cached 5 min
+    expect(calls.some((x) => x.includes('last_get_cmd=' + NOW))).toBe(true);
+    // idle: no viewer for >90 s -> no more requests
+    nowMs += 120_000;
+    const n = calls.length;
+    await hub.tick('g1');
+    expect(calls.length).toBe(n);
+  });
+  it('explains a missing token or team in the guild language', async () => {
+    const c = ctxWith((async () => json({ success: false, error_code: 7202, message: 'User is not in any teams' })) as typeof fetch);
+    const hub = new LiveHub(c, async () => [], { pollSeconds: 20, rpm: 10, now: () => NOW * 1000 });
+    await hub.view('g1', 'el'); hub.stop();
+    await hub.tick('g1');
+    let v = await hub.view('g1', 'el'); hub.stop();
+    expect(v.error).toBe(STRINGS.el['intel.noToken']);
+    withToken(c);
+    await hub.tick('g1');
+    v = await hub.view('g1', 'el'); hub.stop();
+    expect(v.error).toContain('gr999');
+    expect(v.error).toBe(STRINGS.el['web.err.noTeams'].replace('{world}', 'gr999'));
+  });
+});
+
+describe('map payload and timeline', () => {
+  it('builds compact arrays, oldest conquest first', () => {
+    const p = buildMapPayload(world(), { ours: [10], enemies: [20] }, { now: NOW * 1000 });
+    expect(p.towns).toHaveLength(4);
+    expect(p.towns.find((x) => x[0] === 600)?.[4]).toBe(0);
+    expect(p.conquests.map((c) => c[0])).toEqual([NOW - 10 * D, NOW - 3 * D]);
+    expect(p.sides).toEqual({ ours: [10], enemies: [20] });
+  });
+  it('replays owners backwards from today', () => {
+    const hist = [{ time: NOW - 10 * D, newP: 2, oldP: 0, newA: 20, oldA: 0 }, { time: NOW - 3 * D, newP: 1, oldP: 2, newA: 10, oldA: 20 }];
+    const cur = { p: 1, a: 10 };
+    expect(ownerAtTime(cur, hist, NOW, NOW)).toEqual(cur);
+    expect(ownerAtTime(cur, hist, NOW - 5 * D, NOW)).toEqual({ p: 2, a: 20 });
+    expect(ownerAtTime(cur, hist, NOW - 20 * D, NOW)).toEqual({ p: 0, a: 0 });
+    expect(ownerAtTime(cur, undefined, NOW - 20 * D, NOW)).toEqual(cur);
+    const [x, y] = townXY(450, 530, 3);
+    expect(Math.abs(x - 450.5)).toBeLessThan(0.5); expect(Math.abs(y - 530.5)).toBeLessThan(0.5);
+    expect(allianceColor(10)).toMatch(/^hsl\(/);
+  });
+});
+
+describe('web server', () => {
+  async function serve(c: Ctx, fetchImpl: typeof fetch, guilds = ['g1']) {
+    const secret = 'z'.repeat(32);
+    const app = createWebApp({ ctx: c, guilds: { has: (g) => guilds.includes(g), name: (g) => (g === 'g1' ? 'Red server' : null) }, secret, staticDir: null, fetchImpl,
+      hub: new LiveHub(c, async () => [10], { pollSeconds: 20, rpm: 5, now: Date.now }) });
+    const srv = http.createServer(app.handler);
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    return { base, secret, close: () => { app.hub.stop(); srv.close(); } };
+  }
+  it('requires a session for data and serves me/map with one', async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const s = await serve(c, fetch);
+    try {
+      expect((await fetch(`${s.base}/api/me`)).status).toBe(401);
+      const auth = { Authorization: `Bearer ${issueSession(s.secret, { u: 'u1', g: 'g1', n: 'Al' })}` };
+      const me = await (await fetch(`${s.base}/api/me`, { headers: auth })).json() as { world: string; lang: string; guild: string; units: Record<string, string> };
+      expect(me).toMatchObject({ world: 'gr999', lang: 'el', guild: 'Red server' });
+      expect(me.units.sword).toBeTruthy();
+      const map = await (await fetch(`${s.base}/api/map`, { headers: auth })).json() as { towns: unknown[] };
+      expect(map.towns).toHaveLength(4);
+      const other = { Authorization: `Bearer ${issueSession(s.secret, { u: 'u1', g: 'g9' })}` };
+      expect((await fetch(`${s.base}/api/me`, { headers: other })).status).toBe(401); // bot not in that guild
+      expect((await fetch(`${s.base}/terms`)).status).toBe(200);
+      expect(await (await fetch(`${s.base}/privacy`)).text()).toContain('Πολιτική απορρήτου');
+      const cfgJs = await (await fetch(`${s.base}/config.js`)).text();
+      expect(cfgJs).toContain('window.__GC=');
+      expect(cfgJs).not.toContain(config.activityClientSecret || 'never-a-secret');
+      const page = await fetch(`${s.base}/live`);
+      expect(page.status).toBe(503); // no bundle in this test
+      expect(page.headers.get('content-security-policy')).toContain('frame-ancestors');
+    } finally { s.close(); }
+  });
+  it('exchanges the Activity code and checks guild membership', async () => {
+    const old = [config.activityClientId, config.activityClientSecret];
+    config.activityClientId = '123'; config.activityClientSecret = 'sec';
+    const discord = (async (u: string, init?: RequestInit) => {
+      const url = String(u);
+      if (url.endsWith('/oauth2/token')) {
+        const body = new URLSearchParams(String(init?.body));
+        return body.get('code') === 'good' && body.get('client_secret') === 'sec' ? json({ access_token: 'dtok' }) : json({ error: 'invalid_grant' }, 400);
+      }
+      if (url.endsWith('/users/@me')) return json({ id: 'u1', username: 'al', global_name: 'Al' });
+      if (url.endsWith('/users/@me/guilds')) return json([{ id: '111111', name: 'Red' }]);
+      return json({}, 404);
+    }) as typeof fetch;
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    c.store.setGuild({ guildId: '111111', world: 'gr999', lang: 'el', verifiedRoleId: null });
+    const s = await serve(c, discord, ['111111']);
+    const post = (b: unknown) => fetch(`${s.base}/api/token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+    try {
+      const ok = await post({ code: 'good', guild_id: '111111' });
+      const okBody = await ok.json() as { access_token: string; session: string };
+      expect(ok.status).toBe(200);
+      expect(okBody.access_token).toBe('dtok');
+      expect(verify(okBody.session, s.secret)).toMatchObject({ u: 'u1', g: '111111', k: 'activity' });
+      const bad = await post({ code: 'bad', guild_id: '111111' });
+      expect(bad.status).toBe(401);
+      expect(((await bad.json()) as { error: string }).error).toBe(STRINGS.el['web.err.oauth']);
+      expect((await post({ code: 'good', guild_id: '99999999' })).status).toBe(403); // not a member
+      expect((await post({ code: 'good' })).status).toBe(400); // DM
+    } finally { s.close(); [config.activityClientId, config.activityClientSecret] = old; }
+  });
+});

@@ -258,6 +258,12 @@ export const commands = [
     .addSubcommand((s) => s.setName('post').setDescription('Post this week\'s newspaper to the channel now'))
     .addSubcommand((s) => s.setName('status').setDescription('Newspaper schedule and AI usage'))
     .addSubcommand((s) => s.setName('off').setDescription('Stop the weekly newspaper')),
+
+  // ---- Live window / world map (Discord Activity of a separate app, or a personal browser link)
+  new SlashCommandBuilder().setName('live').setDescription('Live window: shared commands and latest intel (Activity or browser)').setDMPermission(false)
+    .addBooleanOption((o) => o.setName('share').setDescription('Post the Activity link in this channel so others can join')),
+  new SlashCommandBuilder().setName('map').setDescription('Interactive world map with a conquest timeline (Activity or browser)').setDMPermission(false)
+    .addBooleanOption((o) => o.setName('share').setDescription('Post the Activity link in this channel so others can join')),
 ];
 
 /** Message actions (right-click a message → Apps). Names may contain spaces; localized in commandJson. */

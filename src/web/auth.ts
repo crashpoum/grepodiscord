@@ -87,18 +87,25 @@ export async function exchangeCode(code: string, redirectUri: string | null, fet
   const body = new URLSearchParams({ client_id: config.activityClientId, client_secret: config.activityClientSecret, grant_type: 'authorization_code', code });
   if (redirectUri) body.set('redirect_uri', redirectUri);
   const res = await fetchImpl(`${API}/oauth2/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body, signal: AbortSignal.timeout(15_000) });
-  const j = (await res.json().catch(() => ({}))) as { access_token?: string; error?: string };
-  if (!res.ok || !j.access_token) throw new OAuthError(`token exchange failed: HTTP ${res.status} ${j.error ?? ''}`.trim());
+  const j = (await res.json().catch(() => ({}))) as { access_token?: string; error?: string; error_description?: string };
+  if (!res.ok || !j.access_token) {
+    const hint = j.error === 'invalid_client' ? ' (check ACTIVITY_CLIENT_SECRET: reset it in the portal and update .env)'
+      : j.error === 'invalid_grant' ? ' (code already used/expired or redirect_uri differs from the portal)' : '';
+    throw new OAuthError(`token exchange failed: HTTP ${res.status} ${j.error ?? ''} ${j.error_description ?? ''}`.replace(/\s+/g, ' ').trim() + hint);
+  }
   return j.access_token;
 }
 
 export async function discordGet<T>(path: string, accessToken: string, fetchImpl: typeof fetch = fetch): Promise<T> {
   const res = await fetchImpl(`${API}${path}`, { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new OAuthError(`GET ${path}: HTTP ${res.status}`);
+  if (!res.ok) throw new OAuthError(`Discord GET ${path}: HTTP ${res.status}`);
   return (await res.json()) as T;
 }
 
 export function authorizeUrl(state: string, redirectUri: string): string {
-  const q = new URLSearchParams({ client_id: config.activityClientId, response_type: 'code', scope: 'identify guilds', redirect_uri: redirectUri, state, prompt: 'none' });
-  return `https://discord.com/oauth2/authorize?${q}`;
+  // Exactly as Discord documents it: scopes separated by %20 (URLSearchParams would write "+"), redirect_uri
+  // percent-encoded and identical to the one sent to /oauth2/token. No `prompt=none`: the consent screen is shown and
+  // then redirects (prompt=none only works once the user has already authorized these scopes).
+  const enc = encodeURIComponent;
+  return `https://discord.com/oauth2/authorize?response_type=code&client_id=${enc(config.activityClientId)}&scope=identify%20guilds&redirect_uri=${enc(redirectUri)}&state=${enc(state)}`;
 }

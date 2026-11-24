@@ -17,6 +17,7 @@ import { gzipSync } from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import type { Ctx } from '../services.js';
 import { config } from '../config.js';
+import { watchActivityApp } from './activityCheck.js';
 import { log } from '../log.js';
 import { t, type Lang } from '../i18n.js';
 import { guildSides } from '../bot/insights.js';
@@ -110,7 +111,9 @@ export function createWebApp(deps: WebDeps) {
   const loginOk = () => oauthReady() && !!config.publicUrl;
   const page = (lang: Lang, msg: string, hint = true) => messagePage(lang, msg, { login: loginOk(), hint });
 
-  // Is the bot still in this guild? Gateway cache first, then Discord REST; 'unknown' trusts the signed token.
+  // Is the bot in this guild? Diagnostics only: a signed token is trusted as is. The bot can answer slash commands in a
+  // server it is not a member of (app installed with only `applications.commands`, or as a user app), so "not in the
+  // gateway cache" or even "Unknown Guild" must not lock people out. Logged so the setup issue is visible.
   const presence = new Map<string, { at: number; v: Presence }>();
   async function botIn(g: string): Promise<boolean> {
     if (guilds.has(g)) return true;
@@ -121,10 +124,14 @@ export function createWebApp(deps: WebDeps) {
       presence.set(g, { at: now(), v });
       log.warn(`web: guild ${g} not in the gateway cache (${guilds.diag?.() ?? 'no diag'}); Discord REST says: ${v}`);
     }
-    return v !== 'no';
+    if (v === 'no') log.warn(`web: the bot user is not a member of guild ${g} (commands still work if the app was added with only "applications.commands"); re-invite it with the "bot" scope for alerts and posts`);
+    return true;
   }
-  /** A guild the web app may serve: the bot is in it and it has a world. */
+  /** A guild the web app may serve: it was set up with the bot (has a world). */
   const usable = async (g: string) => !!ctx.store.getGuild(g).world && (await botIn(g));
+  /** Page after a refused personal link: say why and to get a fresh link; never send a link user to Discord login. */
+  const linkPage = (lang: Lang, msg: string) => messagePage(lang, msg, { login: false, hint: true });
+  const oauthDetail = (e: unknown) => (e instanceof OAuthError ? e.message : 'unexpected error').replace(/[^\w .:/()"'-]/g, '').slice(0, 200);
 
   /** Session from `Authorization: Bearer` (Activity) or the session cookie (browser), with the reason when refused. */
   async function session(req: http.IncomingMessage): Promise<{ s: WebSession } | { why: AuthFail }> {
@@ -135,7 +142,6 @@ export function createWebApp(deps: WebDeps) {
       if (r.why !== 'none') log.warn(`web: ${b ? 'bearer' : 'cookie'} session refused (${r.why}${r.exp ? `, expired ${new Date(r.exp).toISOString()}` : ''}); this process signs with key ${keyId(secret)}`);
       return { why: r.why };
     }
-    if (!(await botIn(r.v.g))) { log.warn(`web: session for guild ${r.v.g} refused: the bot is not in that server`); return { why: 'guild' }; }
     return { s: r.v };
   }
   const secureCookie = (req: http.IncomingMessage) => config.publicUrl.startsWith('https://') || String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https';
@@ -213,7 +219,7 @@ export function createWebApp(deps: WebDeps) {
       try { u = await oauthUser(body.code, null); } catch (e) { log.warn(`web: activity token exchange failed: ${(e as Error).message}`); return json(res, 401, { error: t(lang, 'web.err.oauth') }); }
       if (!g) return json(res, 400, { access_token: u.token, error: t(lang, 'web.err.noGuild') });
       if (!u.guildIds.includes(g)) return json(res, 403, { access_token: u.token, error: t(lang, 'web.err.notMember') });
-      if (!(await botIn(g))) return json(res, 403, { access_token: u.token, error: t(lang, 'web.err.botGone') });
+      await botIn(g);
       return json(res, 200, { access_token: u.token, session: issueSession(secret, { u: u.user.id, g, n: u.user.global_name || u.user.username, k: 'activity' }, undefined, now()) });
     }
 
@@ -222,21 +228,31 @@ export function createWebApp(deps: WebDeps) {
       if (!loginOk()) return html(res, 503, page(lang0, t(lang0, 'web.err.noOAuth')));
       const next = url.searchParams.get('next') === 'map' ? 'map' : 'live';
       const state = sign({ n: next, r: randomBytes(8).toString('hex'), exp: now() + 10 * 60_000 }, secret);
+      log.info(`web: Discord login started (client ${config.activityClientId}, redirect_uri ${redirectUri()})`);
       return redirect(res, authorizeUrl(state, redirectUri()));
     }
     if (req.method === 'GET' && p === '/oauth/callback') {
       if (!limiter.ok(ip)) return html(res, 429, messagePage(lang0, 'Too many requests'));
-      const st = verify<{ n: string; exp: number }>(url.searchParams.get('state'), secret, now());
+      const fail = (status: number, why: string) => {
+        log.warn(`web: Discord login failed: ${why}`);
+        return html(res, status, messagePage(lang0, `${t(lang0, 'web.err.oauth')} (${why})`, { login: loginOk(), hint: true }));
+      };
+      const derr = url.searchParams.get('error');
+      if (derr) return fail(400, `Discord: ${oauthDetail(new OAuthError(`${derr} ${url.searchParams.get('error_description') ?? ''}`.trim()))}`);
+      const st = check<{ n: string; exp: number }>(url.searchParams.get('state'), secret, now());
       const code = url.searchParams.get('code');
-      if (!st || !code || !oauthReady()) return html(res, 400, page(lang0, t(lang0, 'web.err.oauth')));
+      if (!oauthReady()) return fail(503, 'ACTIVITY_CLIENT_ID / ACTIVITY_CLIENT_SECRET not set');
+      if (!st.ok) return fail(400, `state ${st.why === 'expired' ? 'expired (took over 10 minutes), start again' : st.why === 'none' ? 'missing' : 'not signed by this bot'}`);
+      if (!code) return fail(400, 'no code from Discord');
       let u;
-      try { u = await oauthUser(code, redirectUri()); } catch (e) { log.warn(`web: dashboard login failed: ${(e as Error).message}`); return html(res, 401, page(lang0, t(lang0, 'web.err.oauth'))); }
+      try { u = await oauthUser(code, redirectUri()); } catch (e) { return fail(401, oauthDetail(e)); }
       const ok: string[] = [];
       for (const g of u.guildIds) if (await usable(g)) ok.push(g);
+      log.info(`web: Discord login for user ${u.user.id}: ${u.guildIds.length} server(s) from Discord, set up with the bot: ${ok.length ? ok.join(', ') : 'none'}`);
       const name = u.user.global_name || u.user.username;
-      if (!ok.length) return html(res, 403, page(lang0, t(lang0, 'web.err.notMember')));
-      if (ok.length === 1) { const tok = issueSession(secret, { u: u.user.id, g: ok[0], n: name, k: 'oauth' }, undefined, now()); return login(req, res, tok, verify<WebSession>(tok, secret, now())!.exp, st.n); }
-      const pick = sign({ u: u.user.id, gs: ok, n: st.n, nm: name, exp: now() + 10 * 60_000 }, secret);
+      if (!ok.length) { log.warn(`web: Discord login for ${u.user.id}: none of their ${u.guildIds.length} server(s) is set up with the bot`); return html(res, 403, page(lang0, t(lang0, 'web.err.notMember'))); }
+      if (ok.length === 1) { const tok = issueSession(secret, { u: u.user.id, g: ok[0], n: name, k: 'oauth' }, undefined, now()); return login(req, res, tok, verify<WebSession>(tok, secret, now())!.exp, st.v.n); }
+      const pick = sign({ u: u.user.id, gs: ok, n: st.v.n, nm: name, exp: now() + 10 * 60_000 }, secret);
       return html(res, 200, pickerPage(lang0, ok.map((g) => ({ id: g, name: guilds.name(g) ?? g, href: `/oauth/pick?g=${g}&t=${encodeURIComponent(pick)}` }))));
     }
     if (req.method === 'GET' && p === '/oauth/pick') {
@@ -253,14 +269,14 @@ export function createWebApp(deps: WebDeps) {
       const r = check<WebSession>(url.searchParams.get('t'), secret, now());
       if (!r.ok) {
         log.warn(`web: personal link refused (${r.why}); this process signs with key ${keyId(secret)}`);
-        return html(res, 401, page(lang0, t(lang0, AUTH_KEY[r.why])));
+        return html(res, 401, linkPage(lang0, t(lang0, AUTH_KEY[r.why])));
       }
       // Trust the signature (the bot signed it for this guild + user at command time); only refuse when Discord
       // positively says the bot left the server or the user is no longer a member.
       const gl = langOf(r.v.g);
-      if (!(await botIn(r.v.g))) return html(res, 403, page(gl, t(gl, 'web.err.botGone')));
+      await botIn(r.v.g);
       const m = guilds.member ? await guilds.member(r.v.g, r.v.u).catch(() => 'unknown' as Presence) : 'unknown';
-      if (m === 'no') { log.warn(`web: link for user ${r.v.u} refused: no longer a member of ${r.v.g}`); return html(res, 403, page(gl, t(gl, 'web.err.left'))); }
+      if (m === 'no') { log.warn(`web: link for user ${r.v.u} refused: no longer a member of ${r.v.g}`); return html(res, 403, linkPage(gl, t(gl, 'web.err.left'))); }
       return login(req, res, url.searchParams.get('t')!, r.v.exp, go[1]);
     }
     if (req.method === 'GET' && p === '/logout') {
@@ -302,6 +318,7 @@ export function createWebApp(deps: WebDeps) {
 export function startWebServer(ctx: Ctx, guilds: BotGuilds) {
   const secret = webSecret(ctx.store);
   const app = createWebApp({ ctx, guilds, secret });
+  const stopWatch = config.activityClientId ? watchActivityApp() : () => undefined;
   const server = http.createServer(app.handler);
   server.requestTimeout = 30_000;
   server.headersTimeout = 15_000;
@@ -310,7 +327,7 @@ export function startWebServer(ctx: Ctx, guilds: BotGuilds) {
     log.info(`web: live window on :${config.webPort}${config.publicUrl ? ` (public ${config.publicUrl})` : ''}; Activity app ${config.activityClientId ? 'configured' : 'not configured'}${findStaticDir() ? '' : ' — WARNING: web bundle missing'}`);
   });
   server.on('error', (e) => log.error('web server error', e));
-  return { secret, close: () => { app.hub.stop(); server.close(); } };
+  return { secret, close: () => { stopWatch(); app.hub.stop(); server.close(); } };
 }
 
 /**

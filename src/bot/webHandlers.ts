@@ -6,6 +6,7 @@ import { t, type Lang } from '../i18n.js';
 import type { Ctx } from '../services.js';
 import { LINK_HOURS, webSecret } from '../web/auth.js';
 import { dashboardLink } from '../web/server.js';
+import { activityState } from '../web/activityCheck.js';
 
 export type WebTab = 'live' | 'map';
 
@@ -41,7 +42,8 @@ export async function handleLiveMap(ctx: Ctx, i: ChatInputCommandInteraction, la
   if (!i.guildId) throw new UserError('err.guildOnly');
   const tab: WebTab = i.commandName === 'map' ? 'map' : 'live';
   const share = i.options.getBoolean('share') ?? false;
-  const activity = activityUrl(tab);
+  // Hidden while Discord reports that Activities are not enabled on the app (the link would silently do nothing).
+  const activity = activityState() === 'disabled' ? null : activityUrl(tab);
   const browser = personalLink(ctx, i.guildId, i.user.id, displayName(i), tab);
   const plan = launchPlan(tab, share, { activity, browser });
   if (plan.kind === 'none') return void (await i.reply({ embeds: [{ description: t(lang, 'web.notConfigured'), color: 0xfee75c }], flags: MessageFlags.Ephemeral }));
@@ -55,7 +57,7 @@ export async function handleLiveMap(ctx: Ctx, i: ChatInputCommandInteraction, la
     if (activity) row.addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel(t(lang, 'web.btn.activity')).setURL(activity).setEmoji('🎮'));
     if (browser) row.addComponents(new ButtonBuilder().setStyle(ButtonStyle.Secondary).setCustomId(`${OPEN_PREFIX}${tab}`).setLabel(t(lang, 'web.btn.browser')).setEmoji('🌐'));
     const head = t(lang, activity ? 'web.shared' : 'web.sharedBrowser', { user: `<@${i.user.id}>`, what });
-    await i.reply({ content: `**${title}**\n${head}${activity ? `\n${activity}` : ''}`, components: [row], allowedMentions: { parse: [] } });
+    await i.reply({ content: `**${title}**\n${head}${activity ? `\n${activity}\n-# ${t(lang, 'web.body.launcher')}` : ''}`, components: [row], allowedMentions: { parse: [] } });
     return;
   }
   const row = new ActionRowBuilder<ButtonBuilder>();
@@ -64,6 +66,7 @@ export async function handleLiveMap(ctx: Ctx, i: ChatInputCommandInteraction, la
   const body = [
     activity && browser ? t(lang, 'web.body.both') : activity ? t(lang, 'web.body.activity') : t(lang, 'web.body.browser'),
     browser ? t(lang, 'web.body.personal', { hours: LINK_HOURS }) : '',
+    activity ? t(lang, 'web.body.launcher') : '',
     activity && browser ? t(lang, 'web.body.limit') : '',
   ].filter(Boolean);
   const embed: APIEmbed = { title, description: body.join('\n\n'), color: 0x5865f2 };

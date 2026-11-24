@@ -10,6 +10,7 @@ import { activeCommands, Budget, LiveHub, normUnits } from '../src/web/live.js';
 import { buildMapPayload } from '../src/web/mapData.js';
 import { createWebApp, dashboardLink, type BotGuilds } from '../src/web/server.js';
 import { esc, messagePage } from '../src/web/pages.js';
+import { checkActivityApp, readActivityInfo, setActivityState } from '../src/web/activityCheck.js';
 import { activityUrl, handleLiveMap, handleWebButton, launchPlan, OPEN_PREFIX } from '../src/bot/webHandlers.js';
 import { ownerAtTime, townXY, allianceColor } from '../web/src/geo.js';
 import { WEB_STRINGS, wt } from '../src/web/strings.js';
@@ -225,7 +226,7 @@ describe('web server', () => {
       const map = await (await fetch(`${s.base}/api/map`, { headers: auth })).json() as { towns: unknown[] };
       expect(map.towns).toHaveLength(4);
       const other = { Authorization: `Bearer ${issueSession(s.secret, { u: 'u1', g: 'g9' })}` };
-      expect((await fetch(`${s.base}/api/me`, { headers: other })).status).toBe(401); // bot not in that guild
+      expect((await fetch(`${s.base}/api/me`, { headers: other })).status).toBe(200); // signed by the bot: trusted even if it is not a guild member
       expect((await fetch(`${s.base}/terms`)).status).toBe(200);
       expect(await (await fetch(`${s.base}/privacy`)).text()).toContain('Πολιτική απορρήτου');
       const cfgJs = await (await fetch(`${s.base}/config.js`)).text();
@@ -320,7 +321,7 @@ describe('fixes: personal link behind the tunnel, public share', () => {
       const exp = await fetch(`${st.base}/api/me`, { headers: { Authorization: `Bearer ${old}` } });
       expect(await exp.json()).toMatchObject({ reason: 'expired' });
       const foreign = issueSession(SECRET, { u: 'u1', g: 'g9' });
-      expect(await (await fetch(`${st.base}/api/me`, { headers: { Authorization: `Bearer ${foreign}` } })).json()).toMatchObject({ reason: 'guild' });
+      expect(await (await fetch(`${st.base}/api/me`, { headers: { Authorization: `Bearer ${foreign}` } })).json()).toMatchObject({ guildId: 'g9' });
     } finally { st.close(); }
   });
 
@@ -344,15 +345,12 @@ describe('fixes: personal link behind the tunnel, public share', () => {
     expect(asked).toContain(`${g}/u5`);
   });
 
-  it('refuses only when Discord positively says the bot left or the user left', async () => {
+  it('a signed link works even when the bot user is not a member (commands-only install); refused only if the user left', async () => {
     const c = ctxWith((async () => json({}, 404)) as typeof fetch);
     const gone = await stack(c, { has: () => false, name: () => null, check: async () => 'no' });
     try {
       const r = await fetch(`${gone.base}/go/live?t=${issueSession(SECRET, { u: 'u1', g: 'g1' })}`, { redirect: 'manual' });
-      expect(r.status).toBe(403);
-      const body = await r.text();
-      expect(body).toContain(esc(STRINGS.el['web.err.botGone']));
-      expect(body).not.toContain(esc(STRINGS.el['web.err.notMember']));
+      expect(r.status).toBe(302);
     } finally { gone.close(); }
     const left = await stack(c, { has: (g) => g === 'g1', name: () => 'Red', member: async () => 'no' });
     try {
@@ -433,5 +431,101 @@ describe('fixes: personal link behind the tunnel, public share', () => {
       await handleLiveMap(c, priv.i, 'en', 'gr999');
       expect(priv.calls[0].payload.flags).toBe(64);
     } finally { [config.publicUrl, config.webEnabled, config.activityClientId, config.activityLink] = saved as [string, boolean, string, string]; }
+  });
+});
+
+describe('fixes: Discord login callback and the Activity button', () => {
+  const SECRET = 'w'.repeat(32);
+  async function app(c: Ctx, fetchImpl: typeof fetch, guilds: BotGuilds) {
+    const a = createWebApp({ ctx: c, guilds, secret: SECRET, staticDir: null, fetchImpl, hub: new LiveHub(c, async () => [], { pollSeconds: 20, rpm: 5, now: Date.now }) });
+    const srv = http.createServer(a.handler);
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, close: () => { a.hub.stop(); srv.close(); } };
+  }
+  const discord = (guildIds: string[], tokenErr?: { error: string; error_description?: string }) => (async (u: string, init?: RequestInit) => {
+    const url = String(u);
+    if (url.endsWith('/oauth2/token')) {
+      const b = new URLSearchParams(String(init?.body));
+      expect(b.get('redirect_uri')).toBe('https://grepo.example.com/oauth/callback');
+      return tokenErr ? json(tokenErr, 401) : json({ access_token: 'dtok' });
+    }
+    if (url.endsWith('/users/@me')) return json({ id: 'u1', username: 'al', global_name: 'Al' });
+    if (url.endsWith('/users/@me/guilds')) return json(guildIds.map((id) => ({ id, name: 'x' })));
+    return json({}, 404);
+  }) as typeof fetch;
+  const withOAuth = async (fn: () => Promise<void>) => {
+    const old = [config.activityClientId, config.activityClientSecret, config.publicUrl] as const;
+    config.activityClientId = '1574880931146236087'; config.activityClientSecret = 'sec'; config.publicUrl = 'https://grepo.example.com';
+    try { await fn(); } finally { [config.activityClientId, config.activityClientSecret, config.publicUrl] = old; }
+  };
+  const stateFrom = async (base: string) => new URL((await fetch(`${base}/login?next=map`, { redirect: 'manual' })).headers.get('location')!).searchParams.get('state')!;
+
+  it('builds the authorize URL exactly as Discord documents it', async () => withOAuth(async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const s = await app(c, discord([]), { has: () => true, name: () => 'Red' });
+    try {
+      const loc = (await fetch(`${s.base}/login`, { redirect: 'manual' })).headers.get('location')!;
+      expect(loc).toMatch(/^https:\/\/discord\.com\/oauth2\/authorize\?response_type=code&client_id=1574880931146236087&scope=identify%20guilds&redirect_uri=https%3A%2F%2Fgrepo\.example\.com%2Foauth%2Fcallback&state=[\w.-]+$/);
+      expect(loc).not.toContain('prompt=');
+      expect(loc.length).toBeLessThan(400);
+    } finally { s.close(); }
+  }));
+
+  it('logs in the reported user even when the main bot is not a member of the guild (commands-only install)', async () => withOAuth(async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const g = '1173401431538151496';
+    c.store.setGuild({ guildId: g, world: 'gr999', lang: 'el', verifiedRoleId: null });
+    const s = await app(c, discord(['42', g]), { has: () => false, name: () => 'Greek', check: async () => 'no' });
+    try {
+      const r = await fetch(`${s.base}/oauth/callback?code=c0de&state=${await stateFrom(s.base)}`, { redirect: 'manual' });
+      expect(r.status).toBe(302);
+      expect(r.headers.get('location')).toBe('/map');
+      const me = await fetch(`${s.base}/api/me`, { headers: { Cookie: r.headers.get('set-cookie')!.split(';')[0] } });
+      expect(await me.json()).toMatchObject({ guildId: g, user: 'Al' });
+    } finally { s.close(); }
+  }));
+
+  it('shows the real reason when Discord login fails', async () => withOAuth(async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const s = await app(c, discord(['g1'], { error: 'invalid_client' }), { has: () => true, name: () => 'Red' });
+    try {
+      const bad = await (await fetch(`${s.base}/oauth/callback?code=c0de&state=${await stateFrom(s.base)}`)).text();
+      expect(bad).toContain('invalid_client');
+      expect(bad).toContain('ACTIVITY_CLIENT_SECRET');
+      expect(bad).not.toContain('sec&'); // never the secret itself
+      const denied = await (await fetch(`${s.base}/oauth/callback?error=access_denied&error_description=The+resource+owner+denied`)).text();
+      expect(denied).toContain('access_denied');
+      expect(await (await fetch(`${s.base}/oauth/callback?code=x&state=forged.sig`)).text()).toContain('state not signed by this bot');
+      // a refused personal link never sends people to Discord login, even when it is configured
+      const link = await (await fetch(`${s.base}/go/live?t=${issueSession('another-process-key-xxxxxxxxxxxx', { u: 'u1', g: 'g1' })}`)).text();
+      expect(link).not.toContain('href="/login"');
+      expect(link).toContain(esc(STRINGS.en['web.freshLink']));
+    } finally { s.close(); }
+  }));
+
+  it('detects whether Activities are enabled on the app and hides "Open in Discord" when they are not', async () => {
+    expect(readActivityInfo({ flags: 0, embedded_surfaces: [] })).toBe('disabled');
+    expect(readActivityInfo({ flags: 9568258, embedded_surfaces: [0] })).toBe('enabled');
+    expect(readActivityInfo({})).toBe('unknown');
+    expect(await checkActivityApp((async () => json({ flags: 0, embedded_surfaces: [] })) as unknown as typeof fetch, '1574880931146236087')).toBe('disabled');
+    const saved = [config.publicUrl, config.webEnabled, config.activityClientId, config.activityLink] as const;
+    config.publicUrl = 'https://grepo.example.com'; config.webEnabled = true; config.activityClientId = '1574880931146236087'; config.activityLink = '';
+    try {
+      const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+      const reply = async () => {
+        const calls: any[] = [];
+        const i: any = { guildId: 'g1', commandName: 'live', user: { id: 'u7', username: 'f' }, member: { displayName: 'F' }, options: { getBoolean: () => false },
+          reply: async (p: unknown) => { calls.push(JSON.parse(JSON.stringify(p, (_k, v) => (v && typeof v.toJSON === 'function' ? v.toJSON() : v)))); } };
+        await handleLiveMap(c, i, 'el', 'gr999');
+        return calls[0];
+      };
+      setActivityState('disabled');
+      let p = await reply();
+      expect(p.components[0].components.map((b: any) => b.url)).toEqual([expect.stringContaining('/go/live?t=')]);
+      setActivityState('enabled');
+      p = await reply();
+      expect(p.components[0].components[0].url).toBe('https://discord.com/activities/1574880931146236087?custom_id=live');
+      expect(p.embeds[0].description).toContain(STRINGS.el['web.body.launcher']);
+    } finally { setActivityState('unknown'); [config.publicUrl, config.webEnabled, config.activityClientId, config.activityLink] = saved as unknown as [string, boolean, string, string]; }
   });
 });

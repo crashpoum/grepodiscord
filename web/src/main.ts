@@ -32,8 +32,9 @@ async function api<T>(path: string): Promise<T> {
 }
 
 function screen(html: string) { app.innerHTML = `<div class="center">${html}</div>`; }
-function loginScreen(msg: string) {
-  screen(`<p>${esc(msg)}</p>${cfg.oauth && !inActivity ? `<a class="btn" href="/login?next=${tab}">${esc(L('login'))}</a>` : ''}
+/** `offerLogin` only when there is no session at all: a refused personal link needs a fresh link, not Discord login. */
+function loginScreen(msg: string, offerLogin = false) {
+  screen(`<p>${esc(msg)}</p>${offerLogin && cfg.oauth && !inActivity ? `<a class="btn" href="/login?next=${tab}">${esc(L('login'))}</a>` : ''}
     <p class="muted"><a href="/terms">${esc(L('terms'))}</a> · <a href="/privacy">${esc(L('privacy'))}</a></p>`);
 }
 
@@ -95,7 +96,7 @@ function switchTab(t: 'live' | 'map') {
 function fail(e: unknown) {
   if (e instanceof AuthError) {
     try { sessionStorage.removeItem(SKEY); } catch { /* */ }
-    return loginScreen(e.reason === 'none' ? L(cfg.oauth ? 'needLogin' : 'needLink') : e.message);
+    return e.reason === 'none' ? loginScreen(L(cfg.oauth ? 'needLogin' : 'needLink'), true) : loginScreen(`${e.message} ${L('needLink')}`);
   }
   const v = document.getElementById('view');
   const html = `<div class="err">${esc(L('error', { msg: e instanceof Error ? e.message : String(e) }))} <button class="btn small" id="retry">${esc(L('retry'))}</button></div>`;

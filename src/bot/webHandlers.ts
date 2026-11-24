@@ -6,7 +6,7 @@ import { t, type Lang } from '../i18n.js';
 import type { Ctx } from '../services.js';
 import { LINK_HOURS, webSecret } from '../web/auth.js';
 import { dashboardLink } from '../web/server.js';
-import { activityState } from '../web/activityCheck.js';
+import { activityState, refreshIfStale } from '../web/activityCheck.js';
 
 export type WebTab = 'live' | 'map';
 
@@ -43,6 +43,7 @@ export async function handleLiveMap(ctx: Ctx, i: ChatInputCommandInteraction, la
   const tab: WebTab = i.commandName === 'map' ? 'map' : 'live';
   const share = i.options.getBoolean('share') ?? false;
   // Hidden while Discord reports that Activities are not enabled on the app (the link would silently do nothing).
+  if (activityState() !== 'enabled') refreshIfStale();
   const activity = activityState() === 'disabled' ? null : activityUrl(tab);
   const browser = personalLink(ctx, i.guildId, i.user.id, displayName(i), tab);
   const plan = launchPlan(tab, share, { activity, browser });

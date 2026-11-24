@@ -42,3 +42,8 @@ export function watchActivityApp(fetchImpl: typeof fetch = fetch) {
   t.unref?.();
   return () => clearInterval(t);
 }
+
+/** Re-check soon after a portal change: called on /live and /map while the app looks disabled (at most once a minute). */
+export function refreshIfStale(maxAgeMs = 60_000, fetchImpl: typeof fetch = fetch) {
+  if (config.activityClientId && !process.env.VITEST && Date.now() - checkedAt > maxAgeMs) { checkedAt = Date.now(); void checkActivityApp(fetchImpl); }
+}

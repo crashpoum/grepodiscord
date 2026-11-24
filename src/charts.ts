@@ -21,7 +21,7 @@ function baseOptions(title: string) {
     scales: {
       x: { ticks: { color: FG, maxTicksLimit: 10 }, grid: { color: GRID } },
       y: { ticks: { color: FG }, grid: { color: GRID }, position: 'left' as const },
-      y2: { ticks: { color: FG, precision: 0 }, grid: { drawOnChartArea: false }, position: 'right' as const },
+      y2: { beginAtZero: true, ticks: { color: FG, precision: 0 }, grid: { drawOnChartArea: false }, position: 'right' as const },
     },
   };
 }

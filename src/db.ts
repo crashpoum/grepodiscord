@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS ai_usage (day TEXT NOT NULL, model TEXT NOT NULL, cou
 CREATE TABLE IF NOT EXISTS map_marks (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, world TEXT NOT NULL, user_id TEXT NOT NULL, author TEXT NOT NULL,
   kind TEXT NOT NULL, color TEXT NOT NULL, width INTEGER NOT NULL, pts TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS map_marks_gw ON map_marks (guild_id, world, expires_at);
+CREATE TABLE IF NOT EXISTS gg_keys (key_hash TEXT PRIMARY KEY, guild_id TEXT NOT NULL, user_id TEXT NOT NULL, player_id INTEGER, created_at INTEGER NOT NULL, UNIQUE (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS gg_troops (guild_id TEXT NOT NULL, world TEXT NOT NULL, player_id INTEGER NOT NULL, player_name TEXT NOT NULL, user_id TEXT NOT NULL,
+  ts INTEGER NOT NULL, recv_at INTEGER NOT NULL, towns_json TEXT NOT NULL, PRIMARY KEY (guild_id, world, player_id));
+CREATE INDEX IF NOT EXISTS gg_troops_user ON gg_troops (guild_id, user_id);
 `;
 
 export class Store implements FileStore {
@@ -120,6 +124,38 @@ export class Store implements FileStore {
     return Number(r.changes);
   }
   purgeExpiredMarks(now: number): number { return Number(this.db.prepare('DELETE FROM map_marks WHERE expires_at <= ?').run(now).changes); }
+
+  // ---- GrepoGod troop sync (latest snapshot per player; key is stored hashed)
+  upsertGgKey(k: { keyHash: string; guildId: string; userId: string; playerId: number | null; createdAt: number }): void {
+    this.db.prepare('DELETE FROM gg_keys WHERE guild_id = ? AND user_id = ?').run(k.guildId, k.userId);
+    this.db.prepare('INSERT INTO gg_keys (key_hash, guild_id, user_id, player_id, created_at) VALUES (?, ?, ?, ?, ?)').run(k.keyHash, k.guildId, k.userId, k.playerId, k.createdAt);
+  }
+  getGgKeyByHash(keyHash: string): { keyHash: string; guildId: string; userId: string; playerId: number | null; createdAt: number } | null {
+    const r = this.db.prepare('SELECT * FROM gg_keys WHERE key_hash = ?').get(keyHash) as Record<string, unknown> | undefined;
+    return r ? { keyHash, guildId: String(r.guild_id), userId: String(r.user_id), playerId: r.player_id == null ? null : Number(r.player_id), createdAt: Number(r.created_at) } : null;
+  }
+  getGgKeyByUser(guildId: string, userId: string): { keyHash: string; guildId: string; userId: string; playerId: number | null; createdAt: number } | null {
+    const r = this.db.prepare('SELECT * FROM gg_keys WHERE guild_id = ? AND user_id = ?').get(guildId, userId) as Record<string, unknown> | undefined;
+    return r ? { keyHash: String(r.key_hash), guildId, userId, playerId: r.player_id == null ? null : Number(r.player_id), createdAt: Number(r.created_at) } : null;
+  }
+  setGgKeyPlayer(keyHash: string, playerId: number): void {
+    this.db.prepare('UPDATE gg_keys SET player_id = ? WHERE key_hash = ?').run(playerId, keyHash);
+  }
+  deleteGgKey(guildId: string, userId: string): boolean {
+    return Number(this.db.prepare('DELETE FROM gg_keys WHERE guild_id = ? AND user_id = ?').run(guildId, userId).changes) > 0;
+  }
+  putGgTroops(t: { guildId: string; world: string; playerId: number; playerName: string; userId: string; ts: number; recvAt: number; townsJson: string }): void {
+    this.db.prepare(`INSERT INTO gg_troops (guild_id, world, player_id, player_name, user_id, ts, recv_at, towns_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, world, player_id) DO UPDATE SET player_name=excluded.player_name, user_id=excluded.user_id, ts=excluded.ts, recv_at=excluded.recv_at, towns_json=excluded.towns_json`)
+      .run(t.guildId, t.world, t.playerId, t.playerName, t.userId, t.ts, t.recvAt, t.townsJson);
+  }
+  listGgTroops(guildId: string, world: string): { playerId: number; playerName: string; userId: string; ts: number; recvAt: number; townsJson: string }[] {
+    return (this.db.prepare('SELECT * FROM gg_troops WHERE guild_id = ? AND world = ? ORDER BY player_name COLLATE NOCASE').all(guildId, world) as Record<string, unknown>[])
+      .map((r) => ({ playerId: Number(r.player_id), playerName: String(r.player_name), userId: String(r.user_id), ts: Number(r.ts), recvAt: Number(r.recv_at), townsJson: String(r.towns_json) }));
+  }
+  deleteGgTroopsForUser(guildId: string, userId: string): number {
+    return Number(this.db.prepare('DELETE FROM gg_troops WHERE guild_id = ? AND user_id = ?').run(guildId, userId).changes);
+  }
 
   // ---- guild config
   getGuild(guildId: string, defaultLang: Lang = 'en'): GuildConfig {

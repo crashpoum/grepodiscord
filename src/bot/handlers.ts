@@ -15,6 +15,7 @@ import { classifyError, logError, safeEmbed } from './errors.js';
 import { handleOp, handleAlerts, handleWarroom, opAutocomplete } from './opsHandlers.js';
 import { handleQuitRisk, radarSoft } from './insights.js';
 import { handleLiveMap } from './webHandlers.js';
+import { handleGrepoGod } from './ggHandlers.js';
 import { handleNewspaper, handleReport } from './aiHandlers.js';
 
 const COLOR_OK = 0x57f287;
@@ -84,6 +85,7 @@ export async function handleCommand(ctx: Ctx, i: ChatInputCommandInteraction) {
       case 'op': return await handleOp(ctx, i, lang);
       case 'report': return await handleReport(ctx, i, lang);
       case 'newspaper': return await handleNewspaper(ctx, i, lang);
+      case 'grepogod': return await handleGrepoGod(ctx, i, lang);
       case 'live': case 'map': {
         const world = await requireWorld(ctx, i, lang);
         if (!world) return;

@@ -7,6 +7,7 @@ import type { LiveView, LiveCommand, MapPayload } from '../../src/web/types.js';
 import { MapView } from './map.js';
 import { LiveScreen } from './liveView.js';
 import { DrawLayer } from './draw.js';
+import { TroopsScreen, type TroopsView } from './troops.js';
 
 declare global { interface Window { __GC?: { clientId: string; oauth: boolean; lang: WebLang } } }
 interface Me { user: string | null; guildId: string; guild: string | null; world: string | null; lang: WebLang; me: number | null; exp: number; units: Record<string, string>; error: string | null }
@@ -20,7 +21,8 @@ export const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
 const SKEY = 'gc_session';
 let session: string | null = null;
 const inActivity = new URLSearchParams(location.search).has('frame_id');
-let tab: 'live' | 'map' = location.pathname.startsWith('/map') ? 'map' : 'live';
+type Tab = 'live' | 'map' | 'troops';
+let tab: Tab = location.pathname.startsWith('/map') ? 'map' : location.pathname.startsWith('/troops') ? 'troops' : 'live';
 
 class AuthError extends Error { constructor(msg: string, public reason = 'expired') { super(msg); } }
 async function apiRes(path: string, cache: RequestCache): Promise<Response> {
@@ -58,7 +60,7 @@ async function activityAuth(): Promise<void> {
   const { DiscordSDK } = await import('@discord/embedded-app-sdk');
   const sdk = new DiscordSDK(cfg.clientId);
   await sdk.ready();
-  if (sdk.customId === 'map' || sdk.customId === 'live') tab = sdk.customId;
+  if (sdk.customId === 'map' || sdk.customId === 'live' || sdk.customId === 'troops') tab = sdk.customId;
   const locale = (navigator.language || '').toLowerCase();
   if (locale.startsWith('el')) lang = 'el';
   screen(`<p class="muted">${esc(L('signingIn'))}</p>`);
@@ -96,20 +98,22 @@ function renderShell() {
   app.innerHTML = `<div id="shell"><header>
     <span class="brand">🏛️ GrepoCord</span>
     <nav class="tabs"><button class="btn small ${tab === 'live' ? 'on' : 'ghost'}" data-tab="live">📡 ${esc(L('tabLive'))}</button>
-    <button class="btn small ${tab === 'map' ? 'on' : 'ghost'}" data-tab="map">🗺️ ${esc(L('tabMap'))}</button></nav>
+    <button class="btn small ${tab === 'map' ? 'on' : 'ghost'}" data-tab="map">🗺️ ${esc(L('tabMap'))}</button>
+    <button class="btn small ${tab === 'troops' ? 'on' : 'ghost'}" data-tab="troops">🛡️ ${esc(L('tabTroops'))}</button></nav>
     <span class="meta">${esc(me.guild ?? '')} · ${esc(me.world ?? '-')}${me.user ? ` · ${esc(me.user)}` : ''}${inActivity ? '' : ` · <a href="#" id="logout">${esc(L('logout'))}</a>`}</span>
   </header><main id="view"></main></div>`;
-  app.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab as 'live' | 'map')));
+  app.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab as Tab)));
   document.getElementById('logout')?.addEventListener('click', (e) => { e.preventDefault(); try { sessionStorage.removeItem(SKEY); } catch { /* */ } session = null; location.href = '/logout'; });
 }
 
-function switchTab(t: 'live' | 'map') {
+function switchTab(t: Tab) {
   tab = t;
   if (!inActivity) history.replaceState(null, '', `/${t}`);
   drawLayer?.destroy(); drawLayer = null; mapView?.destroy(); mapView = null;
   liveScreen?.destroy(); liveScreen = null;
+  troopsScreen?.destroy(); troopsScreen = null;
   renderShell();
-  if (t === 'live') void startLive(); else void startMap();
+  if (t === 'live') void startLive(); else if (t === 'map') void startMap(); else void startTroops();
 }
 
 function fail(e: unknown) {
@@ -164,6 +168,23 @@ async function startMap() {
   } catch (e) { fail(e); }
 }
 
+// ---------------------------------------------------------------- troops
+let troopsScreen: TroopsScreen | null = null;
+async function pollTroops() {
+  if (tab !== 'troops' || !troopsScreen) return;
+  try {
+    const d = await api<TroopsView>('/api/gg/troops');
+    troopsScreen.markReceived(); troopsScreen.setData(d);
+  } catch (e) { fail(e); }
+}
+async function startTroops() {
+  const v = document.getElementById('view')!;
+  v.style.overflow = 'hidden';
+  troopsScreen = new TroopsScreen(v, { L, esc, lang, units: me.units });
+  (window as unknown as { __gcTroops?: TroopsScreen }).__gcTroops = troopsScreen;
+  await pollTroops();
+}
+
 // ---------------------------------------------------------------- boot
 async function boot() {
   try {
@@ -184,13 +205,14 @@ async function boot() {
     const loop = () => {
       liveTimer = window.setTimeout(async () => {
         if (!document.hidden && (tab === 'live' || mapView?.wantsCommands())) await pollLive();
+        if (!document.hidden && tab === 'troops') await pollTroops();
         loop();
       }, pollMs);
     };
     loop();
-    document.addEventListener('visibilitychange', () => { if (!document.hidden && tab === 'live') void pollLive(); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) return; if (tab === 'live') void pollLive(); if (tab === 'troops') void pollTroops(); });
     // ONE 1 s timer for every countdown/clock on screen.
-    tickTimer = window.setInterval(() => { if (document.hidden) return; liveScreen?.tick(); if (tab === 'map') drawLayer?.maybePoll(); }, 1000);
+    tickTimer = window.setInterval(() => { if (document.hidden) return; liveScreen?.tick(); troopsScreen?.tick(); if (tab === 'map') drawLayer?.maybePoll(); }, 1000);
     window.addEventListener('beforeunload', () => { clearTimeout(liveTimer); clearInterval(tickTimer); });
   } catch (e) { fail(e); }
 }

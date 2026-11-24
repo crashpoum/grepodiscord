@@ -1,7 +1,8 @@
 /**
  * Web app server (node:http, no framework): the Discord Activity and the browser dashboard are the same pages.
  *
- *   GET  /, /live, /map     single-page app (bundle in compiled/public)
+ *   GET  /, /live, /map, /troops  single-page app (bundle in compiled/public)
+ *   POST/DELETE /api/gg/troops  GrepoGod troop sync (Bearer key, CORS for *.grepolis.com)
  *   POST /api/token         Activity OAuth: code -> access_token (+ our session), membership checked
  *   GET  /login, /oauth/*   browser dashboard Discord login (same Activity app credentials)
  *   GET  /api/me|live|map   data, `Authorization: Bearer <session>` (session from /api/token, OAuth or a signed /live link)
@@ -24,6 +25,7 @@ import { guildSides } from '../bot/insights.js';
 import { IslandCache } from './islands.js';
 import { GpCdn } from './gpcdn.js';
 import { MarksService, type MarksResult } from './marks.js';
+import { GgService, ggCorsHeaders, ggSend, readGgBody } from './ggTroops.js';
 import { mapSides } from './mapData.js';
 import { unitName } from '../bot/warPoster.js';
 import { UNIT_EN } from '../planner.js';
@@ -48,7 +50,7 @@ export interface BotGuilds {
   manager?(guildId: string, userId: string): Promise<boolean>;
   diag?(): string;
 }
-export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; gpcdn?: GpCdn; marks?: MarksService; now?: () => number }
+export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; gpcdn?: GpCdn; marks?: MarksService; gg?: GgService; now?: () => number }
 
 type AuthFail = 'none' | 'bad' | 'expired' | 'guild';
 const AUTH_KEY = { none: 'web.err.login', bad: 'web.err.badLink', expired: 'web.err.auth', guild: 'web.err.botGone' } as const;
@@ -136,6 +138,7 @@ export function createWebApp(deps: WebDeps) {
   const islands = deps.islands ?? new IslandCache(fetchImpl, now);
   const gpcdn = deps.gpcdn ?? new GpCdn(fetchImpl, now);
   const marks = deps.marks ?? new MarksService(ctx.store, (g, u) => guilds.manager?.(g, u) ?? Promise.resolve(false), now);
+  const gg = deps.gg ?? new GgService(ctx.store, now);
   const staticDir = deps.staticDir === undefined ? findStaticDir() : deps.staticDir;
   const limiter = new IpLimiter(20, now);
   const mapCache = new Map<string, { key: unknown; at: number; body: Buffer; gz: Buffer; etag: string; sides: string }>();
@@ -181,7 +184,7 @@ export function createWebApp(deps: WebDeps) {
   const secureCookie = (req: http.IncomingMessage) => config.publicUrl.startsWith('https://') || String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https';
   /** Store the session in a cookie and send the browser to the clean page URL (no token left in the address bar). */
   const login = (req: http.IncomingMessage, res: Res, token: string, exp: number, tab: string) => {
-    res.writeHead(302, { Location: `/${tab === 'map' ? 'map' : 'live'}`, 'Set-Cookie': sessionCookie(token, (exp - now()) / 1000, secureCookie(req)), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+    res.writeHead(302, { Location: `/${tab === 'map' || tab === 'troops' ? tab : 'live'}`, 'Set-Cookie': sessionCookie(token, (exp - now()) / 1000, secureCookie(req)), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
     res.end();
   };
 
@@ -240,7 +243,7 @@ export function createWebApp(deps: WebDeps) {
     const ip = String(req.headers['cf-connecting-ip'] ?? req.socket.remoteAddress ?? '?');
     const lang0 = config.defaultLang;
 
-    if (req.method === 'GET' && (p === '/' || p === '/live' || p === '/map')) {
+    if (req.method === 'GET' && (p === '/' || p === '/live' || p === '/map' || p === '/troops')) {
       const page = indexHtml();
       if (!page) return html(res, 503, messagePage(lang0, 'Web bundle missing: run `npm run build`.'));
       return html(res, 200, page);
@@ -332,7 +335,7 @@ export function createWebApp(deps: WebDeps) {
     }
 
     // ---- Personal link from /live or /map: token in the query -> session cookie -> clean URL
-    const go = /^\/go\/(live|map)$/.exec(p);
+    const go = /^\/go\/(live|map|troops)$/.exec(p);
     if (req.method === 'GET' && go) {
       const r = check<WebSession>(url.searchParams.get('t'), secret, now());
       if (!r.ok) {
@@ -350,6 +353,25 @@ export function createWebApp(deps: WebDeps) {
     if (req.method === 'GET' && p === '/logout') {
       res.writeHead(302, { Location: '/', 'Set-Cookie': sessionCookie('', 0, secureCookie(req)), 'Cache-Control': 'no-store' });
       return void res.end();
+    }
+
+    // ---- GrepoGod troop sync (Bearer key, not a Discord session). CORS for grepolis.com origins only.
+    if (p === '/api/gg/troops' && req.method !== 'GET') {
+      const cors = ggCorsHeaders(typeof req.headers.origin === 'string' ? req.headers.origin : undefined);
+      if (req.method === 'OPTIONS') { res.writeHead(cors.allow ? 204 : 403, cors.headers); return void res.end(); }
+      if (!cors.allow) return ggSend(res, 403, { error: 'origin' }, cors.headers);
+      const key = bearer(req.headers.authorization);
+      if (req.method === 'POST') {
+        const raw = await readGgBody(req);
+        if (!raw.ok) return ggSend(res, raw.status, { error: raw.status === 413 ? 'tooLarge' : 'invalid' }, cors.headers);
+        const r = gg.post(key, raw.body);
+        return ggSend(res, r.status, r.body, cors.headers);
+      }
+      if (req.method === 'DELETE') {
+        const r = gg.remove(key);
+        return ggSend(res, r.status, r.body, cors.headers);
+      }
+      return ggSend(res, 405, { error: 'method' }, cors.headers);
     }
 
     // ---- Data API
@@ -385,6 +407,11 @@ export function createWebApp(deps: WebDeps) {
         if (p === '/api/marks') return out(marks.create(s.g, world, s.u, s.n ?? '', body));
         if (p === '/api/marks/delete') return out(await marks.remove(s.g, world, s.u, body.id));
         if (p === '/api/marks/clear') return out(await marks.clear(s.g, world, s.u, body.all === true));
+      }
+      if (p === '/api/gg/troops' && req.method === 'GET') {
+        const world = ctx.store.getGuild(s.g, config.defaultLang).world;
+        if (!world) return json(res, 409, { error: t(lang, 'web.err.notSetup') });
+        return json(res, 200, gg.view(s.g, world, s.u), req);
       }
       if (p === '/api/islands') return islandsPayload(s, req, res);
       return json(res, 404, { error: 'not found' });
@@ -423,7 +450,7 @@ export function startWebServer(ctx: Ctx, guilds: BotGuilds) {
  * Signed personal dashboard link for /live and /map. The token is in the QUERY of /go/<tab>: the server swaps it for an
  * HttpOnly cookie and redirects to the clean URL. (A #fragment is not reliably kept by Discord's link buttons.)
  */
-export function dashboardLink(secret: string, guildId: string, userId: string, name: string, tab: 'live' | 'map', hours: number, at = Date.now()): string | null {
+export function dashboardLink(secret: string, guildId: string, userId: string, name: string, tab: 'live' | 'map' | 'troops', hours: number, at = Date.now()): string | null {
   if (!config.publicUrl) return null;
   return `${config.publicUrl}/go/${tab}?t=${issueSession(secret, { u: userId, g: guildId, n: name, k: 'link' }, hours, at)}`;
 }

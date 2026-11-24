@@ -264,6 +264,11 @@ export const commands = [
     .addBooleanOption((o) => o.setName('share').setDescription('Post the Activity link in this channel so others can join')),
   new SlashCommandBuilder().setName('map').setDescription('Interactive world map with a conquest timeline (Activity or browser)').setDMPermission(false)
     .addBooleanOption((o) => o.setName('share').setDescription('Post the Activity link in this channel so others can join')),
+
+  // ---- GrepoGod troop sync (userscript pushes a snapshot; this server never talks to the game)
+  new SlashCommandBuilder().setName('grepogod').setDescription('Link GrepoGod so this server can see your troops').setDMPermission(false)
+    .addSubcommand((s) => s.setName('link').setDescription('Get a private key for GrepoGod (or replace your existing key)'))
+    .addSubcommand((s) => s.setName('unlink').setDescription('Delete your key and troop data from this server')),
 ];
 
 /** Message actions (right-click a message → Apps). Names may contain spaces; localized in commandJson. */

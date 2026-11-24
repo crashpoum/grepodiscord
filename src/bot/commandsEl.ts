@@ -256,6 +256,10 @@ export const EL: Record<string, [string, string?]> = {
   'live/share': ['κοινοποίηση', 'Δημοσίευση του συνδέσμου Activity σε αυτό το κανάλι για να μπουν κι άλλοι'],
   map: ['χάρτης', 'Διαδραστικός χάρτης κόσμου με χρονολόγιο κατακτήσεων (Activity ή browser)'],
   'map/share': ['κοινοποίηση', 'Δημοσίευση του συνδέσμου Activity σε αυτό το κανάλι για να μπουν κι άλλοι'],
+
+  grepogod: ['grepogod', 'Σύνδεσε το GrepoGod ώστε αυτός ο server να βλέπει τα στρατεύματά σου'],
+  'grepogod/link': ['σύνδεση', 'Πάρε ιδιωτικό κλειδί για το GrepoGod (ή αντικατάστησε το υπάρχον)'],
+  'grepogod/unlink': ['αποσύνδεση', 'Διαγραφή του κλειδιού και των δεδομένων στρατευμάτων από αυτόν τον server'],
 };
 
 /** Look up a localization: exact path first, then the shared "*\/option[=value]" fallback. */

@@ -293,7 +293,33 @@ ul.picker { list-style:none; padding:0; display:flex; flex-direction:column; gap
 .trp-u { display:inline-flex; flex-direction:column; align-items:center; gap:1px; min-width:28px; }
 .trp-u i { font-style:normal; font-size:9px; color:#7d6a4c; letter-spacing:.02em; }
 .trp-u b { font-size:11px; font-variant-numeric:tabular-nums; color:#3b2a14; }
+
+.trp-block { position:absolute; left:10px; right:10px; display:flex; flex-direction:column; gap:8px; }
+.trp-block .trp-p { position:static; left:auto; right:auto; }
+.trp-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; align-items:start; }
+.trp-tile { background:#f8f0d8; border:1px solid #d2b87a; border-radius:8px; overflow:hidden; min-width:0; }
+.trp-tile.open { box-shadow:0 1px 0 #ead9a8; }
+.trp-rs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; max-width:430px; }
+.trp-r { min-width:0; }
+.trp-rl { display:flex; justify-content:space-between; gap:4px; font-size:10.5px; color:#7d6a4c; white-space:nowrap; }
+.trp-rl b { color:#3b2a14; font-weight:700; font-variant-numeric:tabular-nums; }
+.trp-bar { height:7px; background:#e4d4a8; border-radius:99px; overflow:hidden; margin-top:3px; }
+.trp-bar b { display:block; height:100%; border-radius:99px; }
+.trp-bar .trp-w { background:#c4883a; }
+.trp-bar .trp-s { background:#8a8a8a; }
+.trp-bar .trp-i { background:#b8b890; }
+.trp-bar b.full { background:#8b1a10; }
+.trp-wh { margin-top:6px; font-size:11px; color:#7d6a4c; }
+.trp-wh b { color:#3b2a14; }
+.trp-wh .full { color:#8b1a10; font-weight:700; }
+.trp-sp { display:flex; flex-wrap:wrap; gap:5px; }
+.trp-spc { display:inline-flex; align-items:baseline; gap:5px; padding:2px 8px; border-radius:999px; background:#efe3c2; border:1px solid #d2b87a; font-size:11px; color:#3b2a14; max-width:100%; }
+.trp-spc.bad { border-color:#c45a4a; background:#f3d4c8; color:#8b1a10; }
+.trp-spc em { font-style:normal; font-variant-numeric:tabular-nums; color:#7d6a4c; font-size:10px; }
+.trp-spc.bad em { color:#8b1a10; }
 @media (max-width: 700px) {
   .trp-tl, .trp-tt td:first-child { width:auto; display:block; padding-bottom:2px; }
   .trp-trow { flex-direction:column; gap:2px; }
+  .trp-grid { grid-template-columns:1fr; }
+  .trp-rs { grid-template-columns:1fr; max-width:none; }
 }

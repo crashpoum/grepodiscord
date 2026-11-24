@@ -1,18 +1,20 @@
 /**
  * /troops: alliance town lists shared from GrepoGod, shown like its Friends panel
- * (at home / in town / total incl. outside / support / wall). Official unit icons via /gpcdn.
- * Filtering and totals run only when data or filters change; the 1 s timer only refreshes ages.
+ * (2-column town grid, troops in town / support / total / wall, plus resources and active spells).
+ * Filtering and totals run only when data or filters change; the 1 s timer only refreshes ages and countdowns.
  */
 import type { WebKey, WebLang } from '../../src/web/strings.js';
-import { filterSnaps, totalUnits, GG_LIMITS, type GgFilters, type GgPlayerSnap, type GgTown, type UnitMap } from '../../src/web/ggCore.js';
+import { filterSnaps, totalUnits, gridH, townH, GG_LIMITS, type GgFilters, type GgPlayerSnap, type GgRes, type GgSpell, type GgTown, type UnitMap } from '../../src/web/ggCore.js';
+import { HOSTILE_SPELLS, fmtDur, fmtK, spellLabel } from '../../src/web/ggSpells.js';
 import { injectSprite, loadOfficialIcons, unitIcon, UNIT_ORDER } from './icons.js';
 
 interface Opts { L: (k: WebKey, v?: Record<string, string | number>) => string; esc: (s: unknown) => string; lang: WebLang; units: Record<string, string> }
 export interface TroopsView { players: GgPlayerSnap[]; serverNow: number }
 
-const PH = 56, TH = 48, OVERSCAN = 4;
-const townH = (t: GgTown, open: boolean) => open ? 52 + 64 * (2 + (t.it ? 1 : 0) + (Object.keys(t.sup).length ? 1 : 0)) : TH;
-type Row = { k: 'p'; p: GgPlayerSnap; h: number } | { k: 't'; p: GgPlayerSnap; t: GgTown; open: boolean; h: number };
+const PH = 56, TH = 56, OVERSCAN = 4, GAP = 8, HEAD = 52, ROW = 58, RES_H = 100, SPELL_BASE = 36, SPELL_LINE = 26;
+
+
+type Row = { p: GgPlayerSnap; open: boolean; towns: { t: GgTown; open: boolean; h: number }[]; h: number };
 
 function ageText(ms: number, L: Opts['L']): string {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -41,6 +43,30 @@ export function unitsHtml(u: UnitMap | undefined, units: Record<string, string>,
   }).join('');
 }
 
+export function resHtml(r: GgRes, L: Opts['L'], esc: Opts['esc']): string {
+  const cap = r.storage, full = [r.wood, r.stone, r.iron].some((v) => v >= cap);
+  const bar = (key: 'w' | 's' | 'i', label: WebKey, v: number) => {
+    const pct = Math.min(100, Math.round((v / cap) * 100));
+    return `<div class="trp-r"><div class="trp-rl"><span>${esc(L(label))}</span><b>${esc(fmtK(v))}</b></div><div class="trp-bar"><b class="trp-${key}${pct >= 95 ? ' full' : ''}" style="width:${pct}%"></b></div></div>`;
+  };
+  let meta = `${esc(L('warehouse', { n: fmtK(cap) }))}`;
+  if (full) meta += ` · <span class="full">${esc(L('resFull'))}</span>`;
+  if (r.pop_free != null) meta += ` · ${esc(L('freePop', { n: r.pop_free }))}`;
+  return `<div class="trp-rs">${bar('w', 'resWood', r.wood)}${bar('s', 'resStone', r.stone)}${bar('i', 'resSilver', r.iron)}</div><div class="trp-wh">${meta}</div>`;
+}
+
+export function spellsHtml(sp: GgSpell[], L: Opts['L'], esc: Opts['esc'], lang: WebLang, nowSec: number, when: (sec: number) => string): string {
+  if (!sp.length) return `<span class="muted">${esc(L('spellsNone'))}</span>`;
+  return `<span class="trp-sp">${sp.map((s) => {
+    const name = spellLabel(s.id, s.name, lang);
+    const bad = HOSTILE_SPELLS.has(s.id);
+    const end = s.ends_at && s.ends_at > nowSec ? s.ends_at : 0;
+    const tip = [bad ? L('hostileSpell') : '', end ? L('endsAt', { t: when(end) }) : ''].filter(Boolean).join(' · ');
+    const cd = end ? ` <em class="trp-cd" data-end="${end}">${esc(fmtDur(end - nowSec))}</em>` : '';
+    return `<span class="trp-spc${bad ? ' bad' : ''}"${tip ? ` title="${esc(tip)}"` : ''}>${esc(name)}${cd}</span>`;
+  }).join('')}</span>`;
+}
+
 export class TroopsScreen {
   private data: TroopsView | null = null;
   private f: GgFilters = { q: '', player: null, unit: null };
@@ -51,6 +77,7 @@ export class TroopsScreen {
   private raf = 0;
   private lastRange = '';
   private stripKey = '';
+  private cols = 2;
   private el: Record<string, HTMLElement> = {};
   recvAt = Date.now();
   serverNow = Date.now();
@@ -86,21 +113,25 @@ export class TroopsScreen {
   destroy() { cancelAnimationFrame(this.raf); }
   markReceived() { this.recvAt = Date.now(); }
 
+  private colCount() { return (this.el.list.clientWidth || 800) < 700 ? 1 : 2; }
+
   private recompute() {
     const d = this.data;
     if (!d) return;
+    this.cols = this.colCount();
     const ranked = [...d.players].sort((a, b) => Number(b.mine) - Number(a.mine) || a.playerName.localeCompare(b.playerName));
     this.shown = filterSnaps(ranked, this.f);
     this.rows = [];
     for (const p of this.shown) {
-      this.rows.push({ k: 'p', p, h: PH });
-      if (!this.openP.has(p.playerId)) continue;
-      for (const t of p.towns) {
-        const open = this.openT.has(`${p.playerId}:${t.id}`);
-        this.rows.push({ k: 't', p, t, open, h: townH(t, open) });
-      }
+      const open = this.openP.has(p.playerId);
+      const towns = open ? p.towns.map((t) => {
+        const on = this.openT.has(`${p.playerId}:${t.id}`);
+        return { t, open: on, h: townH(t, on) };
+      }) : [];
+      const h = PH + (open && towns.length ? GAP + gridH(towns.map((x) => x.h), this.cols) : 0);
+      this.rows.push({ p, open, towns, h });
     }
-    this.el.spacer.style.height = `${this.rows.reduce((s, r) => s + r.h, 0)}px`;
+    this.el.spacer.style.height = `${this.rows.reduce((s, r) => s + r.h + GAP, 0)}px`;
     const empty = !d.players.length ? this.o.L('troopsEmpty') : !this.rows.length ? this.o.L('noMatchTroops') : '';
     this.el.empty.hidden = !empty;
     this.el.empty.textContent = empty;
@@ -152,45 +183,49 @@ export class TroopsScreen {
     const list = this.el.list, top = list.scrollTop, vh = list.clientHeight || 600;
     let acc = 0, a = 0, b = this.rows.length;
     for (let i = 0; i < this.rows.length; i++) {
-      const h = this.rows[i].h, y1 = acc, y2 = acc + h;
+      const h = this.rows[i].h + GAP, y1 = acc, y2 = acc + h;
       if (y2 >= top - OVERSCAN * TH && a === 0 && i) a = i;
       if (y1 > top + vh + OVERSCAN * TH) { b = i; break; }
       acc += h;
     }
     if (top <= OVERSCAN * TH) a = 0;
-    const range = `${a}-${b}-${this.openP.size}-${this.openT.size}-${this.f.unit ?? ''}`;
+    const range = `${a}-${b}-${this.openP.size}-${this.openT.size}-${this.f.unit ?? ''}-${this.cols}`;
     if (range === this.lastRange) { this.tickAges(); return; }
     this.lastRange = range;
-    const { L, esc } = this.o;
-    const loc = this.o.lang === 'el' ? 'el-GR' : 'en-GB';
+    const { L, esc, lang } = this.o;
+    const loc = lang === 'el' ? 'el-GR' : 'en-GB';
     const when = (sec: number) => new Date(sec * 1000).toLocaleString(loc, { hour: '2-digit', minute: '2-digit', hour12: false, day: 'numeric', month: 'short' });
     const now = Date.now();
+    const nowSec = Math.floor(now / 1000);
     const skew = now - this.recvAt;
-    let y = this.rows.slice(0, a).reduce((s, r) => s + r.h, 0);
+    let y = this.rows.slice(0, a).reduce((s, r) => s + r.h + GAP, 0);
     const out: string[] = [];
     const t0 = performance.now();
     for (let i = a; i < b; i++) {
       const r = this.rows[i];
-      if (r.k === 'p') {
-        const stale = now - (r.p.recvAt + skew) > GG_LIMITS.staleMs;
-        const ini = (Array.from(r.p.playerName.replace(/^[\s#._\-'"·]+/, ''))[0] || '?').toUpperCase();
-        out.push(`<div class="trp-p${stale ? ' stale' : ''}" style="top:${y}px" data-p="${r.p.playerId}">
+      const stale = now - (r.p.recvAt + skew) > GG_LIMITS.staleMs;
+      const ini = (Array.from(r.p.playerName.replace(/^[\s#._\-'"·]+/, ''))[0] || '?').toUpperCase();
+      const tiles = r.open ? `<div class="trp-grid">${r.towns.map((x) => {
+        const id = `${r.p.playerId}:${x.t.id}`;
+        const body = x.open ? `<table class="trp-tt">
+          <tr><td>${esc(L('atHome'))}</td><td>${unitsHtml(x.t.home, this.o.units, esc)}</td></tr>
+          ${x.t.it ? `<tr class="it"><td title="${esc(L('inTownTip'))}"><b>${esc(L('inTown'))}</b></td><td>${unitsHtml(x.t.it, this.o.units, esc)}</td></tr>` : ''}
+          <tr><td>${esc(L('totalIncl'))}</td><td>${unitsHtml(x.t.total, this.o.units, esc)}</td></tr>
+          ${Object.keys(x.t.sup).length ? `<tr><td>${esc(L('supportIn'))}</td><td>${unitsHtml(x.t.sup, this.o.units, esc)}</td></tr>` : ''}
+          ${x.t.res ? `<tr><td>${esc(L('resRow'))}</td><td>${resHtml(x.t.res, L, esc)}</td></tr>` : ''}
+          ${x.t.spells ? `<tr><td>${esc(L('spellsRow'))}</td><td>${spellsHtml(x.t.spells, L, esc, lang, nowSec, when)}</td></tr>` : ''}
+        </table>` : '';
+        return `<div class="trp-tile${x.open ? ' open' : ''}" data-tid="${esc(id)}">
+          <div class="trp-th"><span class="trp-car">${x.open ? '▾' : '▸'}</span><b title="${esc(x.t.n)}">${esc(x.t.n)}</b>${wallBadge(x.t, L, esc, when)}<span class="trp-sea">${esc(L('oceanN', { n: x.t.sea }))}</span></div>${body}</div>`;
+      }).join('')}</div>` : '';
+      out.push(`<div class="trp-block" style="top:${y}px;height:${r.h}px">
+        <div class="trp-p${stale ? ' stale' : ''}" data-p="${r.p.playerId}">
           <span class="trp-av">${esc(ini)}<i class="${stale ? '' : 'on'}"></i></span>
           <span class="trp-pn"><b>${esc(r.p.playerName)}${r.p.mine ? ` <em>${esc(L('youBadge'))}</em>` : ''}</b>
             <span><em class="${stale ? 'off' : 'on'}">${esc(L(stale ? 'stale' : 'online'))}</em> · <span class="trp-age" data-at="${r.p.recvAt}">${esc(L('updatedAgo', { t: ageText(now - (r.p.recvAt + skew), L) }))}</span></span></span>
-          <span class="trp-ps">${esc(L('townsCount', { n: r.p.towns.length }))} <span class="trp-car">${this.openP.has(r.p.playerId) ? '▾' : '▸'}</span></span></div>`);
-      } else {
-        const id = `${r.p.playerId}:${r.t.id}`;
-        const body = r.open ? `<table class="trp-tt">
-          <tr><td>${esc(L('atHome'))}</td><td>${unitsHtml(r.t.home, this.o.units, esc)}</td></tr>
-          ${r.t.it ? `<tr class="it"><td title="${esc(L('inTownTip'))}"><b>${esc(L('inTown'))}</b></td><td>${unitsHtml(r.t.it, this.o.units, esc)}</td></tr>` : ''}
-          <tr><td>${esc(L('totalIncl'))}</td><td>${unitsHtml(r.t.total, this.o.units, esc)}</td></tr>
-          ${Object.keys(r.t.sup).length ? `<tr><td>${esc(L('supportIn'))}</td><td>${unitsHtml(r.t.sup, this.o.units, esc)}</td></tr>` : ''}
-        </table>` : '';
-        out.push(`<div class="trp-t${r.open ? ' open' : ''}" style="top:${y}px;height:${r.h}px" data-tid="${esc(id)}">
-          <div class="trp-th"><span class="trp-car">${r.open ? '▾' : '▸'}</span><b title="${esc(r.t.n)}">${esc(r.t.n)}</b>${wallBadge(r.t, L, esc, when)}<span class="trp-sea">${esc(L('oceanN', { n: r.t.sea }))}</span></div>${body}</div>`);
-      }
-      y += r.h;
+          <span class="trp-ps">${esc(L('townsCount', { n: r.p.towns.length }))} <span class="trp-car">${r.open ? '▾' : '▸'}</span></span>
+        </div>${tiles}</div>`);
+      y += r.h + GAP;
     }
     this.el.rows.innerHTML = out.join('');
     this.renderMs = performance.now() - t0;
@@ -200,9 +235,15 @@ export class TroopsScreen {
   private tickAges() {
     if (!this.data) return;
     const { L } = this.o;
-    const now = Date.now(), skew = now - this.recvAt;
+    const now = Date.now(), skew = now - this.recvAt, nowSec = Math.floor(now / 1000);
     this.root.querySelectorAll<HTMLElement>('.trp-age[data-at]').forEach((el) => {
       el.textContent = L('updatedAgo', { t: ageText(now - (Number(el.dataset.at) + skew), L) });
+    });
+    this.root.querySelectorAll<HTMLElement>('.trp-cd[data-end]').forEach((el) => {
+      const end = Number(el.dataset.end) || 0;
+      const left = Math.max(0, end - nowSec);
+      el.textContent = fmtDur(left);
+      el.hidden = left <= 0;
     });
   }
 
@@ -215,8 +256,8 @@ export class TroopsScreen {
     this.el.units.addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-u]'); if (!b) return; const u = b.dataset.u!; this.f.unit = this.f.unit === u ? null : u; refilter(); });
     this.el.list.addEventListener('scroll', () => this.schedule(), { passive: true });
     this.el.rows.addEventListener('click', (e) => {
-      const p = (e.target as HTMLElement).closest<HTMLElement>('[data-p]');
       const t = (e.target as HTMLElement).closest<HTMLElement>('[data-tid]');
+      const p = (e.target as HTMLElement).closest<HTMLElement>('[data-p]');
       if (t) {
         const id = t.dataset.tid!;
         if (this.openT.has(id)) this.openT.delete(id); else this.openT.add(id);
@@ -228,6 +269,10 @@ export class TroopsScreen {
         this.recompute();
       }
     });
-    new ResizeObserver(() => { this.lastRange = ''; this.schedule(); }).observe(this.el.list);
+    new ResizeObserver(() => {
+      const next = this.colCount();
+      if (next !== this.cols) { this.cols = next; this.recompute(); }
+      else { this.lastRange = ''; this.schedule(); }
+    }).observe(this.el.list);
   }
 }

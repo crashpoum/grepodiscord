@@ -237,6 +237,17 @@ const en = {
   noMatchTroops: "No towns match these filters.",
   showTowns: "Show towns",
   hideTowns: "Hide towns",
+  resRow: "Resources",
+  resWood: "Wood",
+  resStone: "Stone",
+  resSilver: "Silver",
+  warehouse: "Warehouse {n}",
+  freePop: "Free population {n}",
+  resFull: "Full",
+  spellsRow: "Active spells",
+  spellsNone: "none",
+  hostileSpell: "Hostile spell",
+  endsAt: "Ends at {t}",
 } as const;
 
 export type WebKey = keyof typeof en;
@@ -477,6 +488,17 @@ const el: Record<WebKey, string> = {
   noMatchTroops: "Καμία πόλη δεν ταιριάζει με αυτά τα φίλτρα.",
   showTowns: "Εμφάνιση πόλεων",
   hideTowns: "Απόκρυψη πόλεων",
+  resRow: "Πρώτες ύλες",
+  resWood: "Ξύλο",
+  resStone: "Πέτρα",
+  resSilver: "Ασήμι",
+  warehouse: "Αποθήκη {n}",
+  freePop: "Ελεύθερος πληθυσμός {n}",
+  resFull: "Γεμάτη",
+  spellsRow: "Ενεργά ξόρκια",
+  spellsNone: "κανένα",
+  hostileSpell: "Εχθρικό ξόρκι",
+  endsAt: "Λήγει στις {t}",
 };
 
 export const WEB_STRINGS: Record<WebLang, Record<WebKey, string>> = { en, el };

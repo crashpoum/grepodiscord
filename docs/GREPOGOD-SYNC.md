@@ -10,11 +10,11 @@ GrepoGod must make **no extra in-game requests** to build this payload:
 
 - no game API / ajax / `gpajax` / town-info / window-open calls
 - no opening game windows or switching towns in order to fetch data
-- use **only** data already loaded in the client models (`ITowns`, `MM`, and the same helpers `frSnapshot()` already uses: `t.units()`, `t.unitsOuter()`, `t.unitsSupport()`, `frWall()`, `frSupportIn()` / `cleanUnits()`)
+- use **only** data already loaded in the client models (`ITowns`, `MM`, and the same helpers `frSnapshot()` / `frResRead()` / `frSpellsAll()` already use: `t.units()`, `t.unitsOuter()`, `t.unitsSupport()`, `frWall()`, `frSupportIn()` / `cleanUnits()`, `t.resources()`, warehouse / free-pop helpers, and `CastedPowers` already in `MM`)
 
 The **only** network call for this feature is the `POST` or `DELETE` to GrepoCord, via `GM_xmlhttpRequest`.
 
-`frSnapshot()` already reads everything this endpoint needs from those models. Reuse its town objects (`id`, `n`, `sea`, `home`, `total`, `sup`, `w` / `wq` / `wa`, `it`). Do not add a second data path.
+`frSnapshot()` (plus the existing `frSnap59` resource and spell helpers) already reads everything this endpoint needs from those models. Reuse its town objects (`id`, `n`, `sea`, `home`, `total`, `sup`, `w` / `wq` / `wa`, `it`) and, when the share switches are on, attach `res` and `spells` from the same in-memory sources. Do not add a second data path and do not open windows or ajax to fill resources or spells.
 
 ---
 
@@ -66,7 +66,12 @@ The key is bound to that Discord server and, when the user is verified, to their
       "it": { "sword": 120, "slinger": 300, "hoplite": 50 },
       "w": 25,
       "wq": 26,
-      "wa": 1764103600
+      "wa": 1764103600,
+      "res": { "wood": 15000, "stone": 18600, "iron": 3000, "storage": 30600, "pop_free": 209 },
+      "spells": [
+        { "id": "happiness", "ends_at": 1764107200 },
+        { "id": "town_protection", "ends_at": 1764118000 }
+      ]
     }
   ]
 }
@@ -90,10 +95,12 @@ Field meanings (same as `frSnapshot()`):
 | `towns[].w` | Current wall level (0–30). Optional. |
 | `towns[].wq` | Wall level after queued wall orders finish, only when it differs from `w`. Optional. |
 | `towns[].wa` | Unix **seconds** when the last queued wall order finishes. Optional. |
+| `towns[].res` | Optional. Only when GrepoGod's **Resources and warehouse** share switch (`friends.shRes`) is **on**. Same already-loaded sources as `frResRead()`: `t.resources()` for wood / stone / iron (silver), warehouse capacity, free population. Omit the field entirely when the switch is off or the model is missing for that town. Values may be rounded the same way `frRound` already does. Numbers only, integers, `0…10_000_000` (`storage` ≥ 1); `pop_free` is optional (`0…1_000_000`). |
+| `towns[].spells` | Optional. Only when GrepoGod's **Active spells** share switch (`friends.shSp`) is **on**. Same already-loaded sources as `frSpellsAll()`: `MM` `CastedPowers` models and town-agnostic fragments already in memory. Each entry is `{ id, name?, ends_at? }`. `id` is the official power id (`/^[a-z][a-z0-9_]{0,39}$/`). `name` is optional (GrepoCord has its own EN/GR map and will fall back to the id; never send an object). `ends_at` is unix **seconds**, only when the model already has `end_at`. At most 12 spells per town. Send `[]` when the switch is on but the town has no lingering spells. Omit the field entirely when the switch is off. |
 
-Unit maps: keys are official unit ids (`/^[a-z][a-z0-9_]{0,39}$/`), values are whole numbers `1…10_000_000`. Drop zeroes (`cleanUnits()`). At most 60 keys per map, 250 towns, **256 KB** for the whole body. Extra fields (`moves`, `inc`, `sched`, …) may be present and are ignored.
+Unit maps: keys are official unit ids (`/^[a-z][a-z0-9_]{0,39}$/`), values are whole numbers `1…10_000_000`. Drop zeroes (`cleanUnits()`). At most 60 keys per map, 250 towns, **256 KB** for the whole body. Extra fields (`moves`, `inc`, `sched`, `rs`, `sp`, …) may be present and are ignored — put resources and spells **on each town** as `res` / `spells`, do not rely on the top-level `rs` / `sp` maps.
 
-Do not invent missing counts. If a model is unavailable, send `{}` (or omit `it` / wall fields), never pad with guessed units.
+Do not invent missing counts. If a model is unavailable, send `{}` (or omit `it` / wall / `res` / `spells` fields), never pad with guessed units, resources or spells. **No extra in-game requests** to fill `res` or `spells`.
 
 ### Responses
 
@@ -115,7 +122,7 @@ When the user turns the opt-in **off**, call `DELETE /api/gg/troops` with the sa
 
 ## Pacing
 
-- Push when the troop snapshot **changes** (hash the `towns` array, same idea as `frHash(frSnapshot())`).
+- Push when the troop snapshot **changes** (hash the `towns` array, same idea as `frHash(frSnapshot())`). A fresh resource reading must **not** by itself trigger an instant push (GrepoGod already treats `rs` as “present or not” in `frHash`); resources and spells travel with the normal 30 s / 5 min cadence.
 - **At most every 30 seconds**, even if it changes more often.
 - **Re-push every 5 minutes** even if nothing changed (heartbeat so GrepoCord can show a last-sync age and mark stale data).
 - The server additionally rejects more than one write per 15 seconds; treat `429` as “try again later”, not as a retry storm.
@@ -147,4 +154,4 @@ On toggle **off**, `DELETE` as above and stop the timer.
 
 ## What GrepoCord shows
 
-Guild members (the same people who can open `/live`) see a **Troops** tab: each linked player, last-sync age, and their towns in the Friends-list layout — at home, in town (own + support), total including units outside, support in town, and wall level (with upgrade / demolition if `wq` is sent). Official Grepolis unit icons are loaded through GrepoCord's own `/gpcdn` proxy. Filters: player, town search, unit type. An alliance-wide totals row sums the towns currently shown.
+Guild members (the same people who can open `/live`) see a **Troops** tab: each linked player, last-sync age, and their towns in a two-column grid like GrepoGod's Friends list (name, wall chip, ocean on the compact card; click to expand). The expanded town shows troops at home, in town (own + support), total including units outside, support in town, and wall level (with upgrade / demolition if `wq` is sent). When `res` is present, a Resources row shows Wood / Stone / Silver bars relative to warehouse storage, plus warehouse size and free population. When `spells` is present, an Active spells row shows named pills (EN/GR from the power id, falling back to a sanitized `name` or the id — never `[object Object]`) and a live countdown from `ends_at`. Official Grepolis unit icons are loaded through GrepoCord's own `/gpcdn` proxy. Filters: player, town search, unit type. An alliance-wide totals row sums the towns currently shown.

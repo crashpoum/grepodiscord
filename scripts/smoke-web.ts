@@ -94,14 +94,17 @@ const ctx = { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fakeGd)
     return list[i % list.length];
   };
   const nowMs = Date.now();
+  const nowSec = Math.floor(nowMs / 1000);
+  const res = (wood: number, stone: number, iron: number, storage: number, pop?: number) => ({ wood, stone, iron, storage, ...(pop != null ? { pop_free: pop } : {}) });
+  const sp = (...ids: [string, number?][]) => ids.map(([id, inMin]) => ({ id, ...(inMin != null ? { ends_at: nowSec + inMin * 60 } : {}) }));
   const wall = (lv: number, q?: number, inMin?: number) => (q != null && q !== lv ? { w: lv, wq: q, wa: Math.floor(nowMs / 1000) + (inMin ?? 40) * 60 } : { w: lv });
-  const add = (userId: string, playerId: number, playerName: string, recvAgoMin: number, towns: { t: (typeof ours)[0]; home: Record<string, number>; outer?: Record<string, number>; sup?: Record<string, number>; w?: number; wq?: number; wa?: number }[]) => {
-    const rows = towns.map(({ t, home, outer = {}, sup = {}, w, wq, wa }) => {
+  const add = (userId: string, playerId: number, playerName: string, recvAgoMin: number, towns: { t: (typeof ours)[0]; home: Record<string, number>; outer?: Record<string, number>; sup?: Record<string, number>; w?: number; wq?: number; wa?: number; res?: { wood: number; stone: number; iron: number; storage: number; pop_free?: number }; spells?: { id: string; ends_at?: number }[] }[]) => {
+    const rows = towns.map(({ t, home, outer = {}, sup = {}, w, wq, wa, res, spells }) => {
       const total: Record<string, number> = { ...home };
       for (const [k, n] of Object.entries(outer)) total[k] = (total[k] ?? 0) + n;
       const it: Record<string, number> = { ...home };
       for (const [k, n] of Object.entries(sup)) it[k] = (it[k] ?? 0) + n;
-      return { id: t.id, n: t.name, sea: Math.floor(t.islandX / 100) * 10 + Math.floor(t.islandY / 100), home, total, sup, it, ...(w != null ? { w, ...(wq != null ? { wq, wa } : {}) } : {}) };
+      return { id: t.id, n: t.name, sea: Math.floor(t.islandX / 100) * 10 + Math.floor(t.islandY / 100), home, total, sup, it, ...(w != null ? { w, ...(wq != null ? { wq, wa } : {}) } : {}), ...(res ? { res } : {}), ...(spells ? { spells } : {}) };
     });
     store.upsertGgKey({ keyHash: `smoke:${userId}`, guildId: 'G1', userId, playerId, createdAt: nowMs });
     store.putGgTroops({ guildId: 'G1', world: W, playerId, playerName, userId, ts: nowMs - recvAgoMin * 60_000, recvAt: nowMs - recvAgoMin * 60_000, townsJson: JSON.stringify(rows) });
@@ -109,24 +112,25 @@ const ctx = { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fakeGd)
   const o0 = ours[0], o1 = ours[Math.min(3, ours.length - 1)], o2 = ours[Math.min(7, ours.length - 1)];
   const o3 = ours[Math.min(11, ours.length - 1)];
   add('U1', 9001, 'Smoke', 0.4, [
-    { t: o0, home: { sword: 420, slinger: 800, hoplite: 210, catapult: 8 }, outer: { bireme: 40, attack_ship: 12 }, sup: { hoplite: 150, archer: 80 }, ...wall(25, 26, 55) },
-    { t: o1, home: { rider: 180, chariot: 40, archer: 300 }, outer: { small_transporter: 20, slinger: 200 }, sup: {}, ...wall(20) },
-    { t: o2, home: { manticore: 6, griffin: 4, harpy: 20, sword: 50 }, outer: {}, sup: { hoplite: 400 }, ...wall(22, 21, 120) },
+    { t: o0, home: { sword: 420, slinger: 800, hoplite: 210, catapult: 8 }, outer: { bireme: 40, attack_ship: 12 }, sup: { hoplite: 150, archer: 80 }, ...wall(25, 26, 55), res: res(15000, 18600, 3000, 30600, 209), spells: sp(['happiness', 180], ['town_protection', 320], ['call_of_the_ocean']) },
+    { t: o1, home: { rider: 180, chariot: 40, archer: 300 }, outer: { small_transporter: 20, slinger: 200 }, sup: {}, ...wall(20), res: res(8200, 9100, 6400, 18600, 80), spells: sp(['fertility_improvement', 90], ['pest', 40]) },
+    { t: o2, home: { manticore: 6, griffin: 4, harpy: 20, sword: 50 }, outer: {}, sup: { hoplite: 400 }, ...wall(22, 21, 120), res: res(26000, 30600, 14000, 30600, 12), spells: [] },
   ]);
   add('U2', 9002, 'Leonidas_GR', 1.2, [
-    { t: pick(top[0].id, 2), home: { sword: 1000, slinger: 1400, hoplite: 600, catapult: 20, archer: 500 }, outer: { bireme: 80, trireme: 15, colonize_ship: 1 }, sup: { sword: 200 }, ...wall(25) },
-    { t: pick(top[0].id, 4), home: { attack_ship: 60, bireme: 30, demolition_ship: 8 }, outer: {}, sup: {}, ...wall(18) },
-    { t: pick(top[0].id, 8), home: { medusa: 10, minotaur: 8, centaur: 40, pegasus: 6 }, outer: { big_transporter: 16 }, sup: { hoplite: 80 }, ...wall(24, 25, 80) },
-    { t: pick(top[0].id, 10), home: { militia: 200, sword: 40 }, outer: {}, sup: {}, ...wall(7) },
+    { t: pick(top[0].id, 2), home: { sword: 1000, slinger: 1400, hoplite: 600, catapult: 20, archer: 500 }, outer: { bireme: 80, trireme: 15, colonize_ship: 1 }, sup: { sword: 200 }, ...wall(25), res: res(22000, 15400, 9800, 24800, 40), spells: sp(['spartan_training', 240], ['happiness', 60]) },
+    { t: pick(top[0].id, 4), home: { attack_ship: 60, bireme: 30, demolition_ship: 8 }, outer: {}, sup: {}, ...wall(18), res: res(4000, 1200, 800, 12400, 310), spells: [] },
+    { t: pick(top[0].id, 8), home: { medusa: 10, minotaur: 8, centaur: 40, pegasus: 6 }, outer: { big_transporter: 16 }, sup: { hoplite: 80 }, ...wall(24, 25, 80), res: res(11000, 10800, 17000, 18600, 5), spells: sp(['cap_of_invisibility', 25]) },
+    { t: pick(top[0].id, 10), home: { militia: 200, sword: 40 }, outer: {}, sup: {}, ...wall(7), res: res(900, 700, 400, 3600, 120), spells: sp(['illusion', 15]) },
   ]);
   add('U3', 9003, 'Ariadne', 18, [ // stale
-    { t: o3, home: { sword: 80, slinger: 120 }, outer: { bireme: 6 }, sup: {}, ...wall(15) },
-    { t: pick(top[0].id, 14), home: { hercules: 1, hoplite: 300, archer: 200 }, outer: {}, sup: { slinger: 50 }, ...wall(19) },
+    { t: o3, home: { sword: 80, slinger: 120 }, outer: { bireme: 6 }, sup: {}, ...wall(15), res: res(5000, 4200, 2100, 8600, 60), spells: sp(['happiness', 10]) },
+    { t: pick(top[0].id, 14), home: { hercules: 1, hoplite: 300, archer: 200 }, outer: {}, sup: { slinger: 50 }, ...wall(19), res: res(13000, 9000, 11000, 18600, 22), spells: [] },
   ]);
 }
 const app = createWebApp({ ctx, guilds: { has: () => true, name: () => 'Smoke server', manager: async () => true }, secret: 's'.repeat(32) });
 http.createServer(app.handler).listen(PORT, () => {
   const tok = issueSession('s'.repeat(32), { u: 'U1', g: 'G1', n: 'Smoke' });
-  console.log(`LIVE http://localhost:${PORT}/go/live?t=${tok}`);
-  console.log(`MAP  http://localhost:${PORT}/go/map?t=${tok}`);
+  console.log(`LIVE   http://localhost:${PORT}/go/live?t=${tok}`);
+  console.log(`MAP    http://localhost:${PORT}/go/map?t=${tok}`);
+  console.log(`TROOPS http://localhost:${PORT}/go/troops?t=${tok}`);
 });

@@ -3,7 +3,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Store } from '../src/db.js';
 import { GgService, grepolisOrigin, hashGgKey, newGgKey } from '../src/web/ggTroops.js';
-import { cleanUnitMap, filterSnaps, looksLikeGgKey, totalUnits, validatePayload, GG_KEY_PREFIX, GG_LIMITS, type GgPlayerSnap, type GgTown } from '../src/web/ggCore.js';
+import { cleanRes, cleanSpells, cleanUnitMap, filterSnaps, gridH, looksLikeGgKey, totalUnits, townH, validatePayload, GG_KEY_PREFIX, GG_LIMITS, type GgPlayerSnap, type GgTown } from '../src/web/ggCore.js';
+import { fmtDur, fmtK, spellLabel } from '../src/web/ggSpells.js';
 import { createWebApp } from '../src/web/server.js';
 import { issueSession } from '../src/web/auth.js';
 import { LiveHub } from '../src/web/live.js';
@@ -52,6 +53,49 @@ describe('GrepoGod payload validation', () => {
       expect(Math.abs(b.p.ts - now)).toBeLessThan(2);
     }
   });
+
+  it('accepts optional per-town res and spells and rejects bad values', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const good = town(1, {
+      res: { wood: 15000, stone: 18600, iron: 3000, storage: 30600, pop_free: 209 },
+      spells: [{ id: 'happiness', ends_at: now + 3600 }, { id: 'town_protection' }],
+    });
+    const r = validatePayload(body({ towns: [good] }), Date.now(), okW);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.p.towns[0].res).toEqual({ wood: 15000, stone: 18600, iron: 3000, storage: 30600, pop_free: 209 });
+      expect(r.p.towns[0].spells).toEqual([{ id: 'happiness', ends_at: now + 3600 }, { id: 'town_protection' }]);
+    }
+    expect(validatePayload(body({ towns: [town(1, { res: { wood: 1, stone: 1, iron: 1, storage: 0 } })] }), Date.now(), okW).ok).toBe(false);
+    expect(validatePayload(body({ towns: [town(1, { res: { wood: 1.5, stone: 1, iron: 1, storage: 10 } })] }), Date.now(), okW).ok).toBe(false);
+    expect(validatePayload(body({ towns: [town(1, { res: { wood: -1, stone: 1, iron: 1, storage: 10 } })] }), Date.now(), okW).ok).toBe(false);
+    expect(validatePayload(body({ towns: [town(1, { spells: [{ id: 'Happiness' }] })] }), Date.now(), okW).ok).toBe(false);
+    expect(validatePayload(body({ towns: [town(1, { spells: [{ id: 'happiness', ends_at: 1.5 }] })] }), Date.now(), okW).ok).toBe(false);
+    expect(validatePayload(body({ towns: [town(1, { spells: Array.from({ length: GG_LIMITS.spells + 1 }, (_, i) => ({ id: `spell_${i}` })) })] }), Date.now(), okW).ok).toBe(false);
+    const objName = validatePayload(body({ towns: [town(1, { spells: [{ id: 'happiness', name: { foo: 1 } as unknown as string }] })] }), Date.now(), okW);
+    expect(objName.ok).toBe(true);
+    if (objName.ok) expect(objName.p.towns[0].spells![0]).toEqual({ id: 'happiness' });
+    expect(cleanRes({ wood: 1, stone: 2, iron: 3, storage: 10 })).toEqual({ wood: 1, stone: 2, iron: 3, storage: 10 });
+    expect(cleanSpells([{ id: 'happiness', name: '<b>X</b>' }])).toEqual([{ id: 'happiness', name: 'bX/b' }]);
+  });
+  it('spell labels never become [object Object] and fmtK / countdown helpers match GrepoGod', () => {
+    expect(spellLabel('happiness', undefined, 'en')).toBe('Happiness');
+    expect(spellLabel('happiness', undefined, 'el')).toBe('Ευτυχία');
+    expect(spellLabel('unknown_power', 'Custom Aura', 'en')).toBe('Custom Aura');
+    expect(spellLabel('unknown_power', { n: 1 }, 'en')).toBe('unknown power');
+    expect(spellLabel('unknown_power', '[object Object]', 'en')).toBe('unknown power');
+    expect(fmtK(15000)).toBe('15k');
+    expect(fmtK(18600)).toBe('18.6k');
+    expect(fmtK(3000)).toBe('3k');
+    expect(fmtK(30600)).toBe('30.6k');
+    expect(fmtDur(0)).toBe('00:00:00');
+    expect(fmtDur(3661)).toBe('01:01:01');
+    const compact = { id: 1, n: 'A', sea: 1, home: {}, total: {}, sup: {} };
+    const rich = { ...compact, it: { sword: 1 }, sup: { hoplite: 1 }, res: { wood: 1, stone: 1, iron: 1, storage: 10 }, spells: [{ id: 'happiness' }, { id: 'pest' }] };
+    expect(townH(compact, false)).toBeLessThan(townH(rich, true));
+    expect(gridH([50, 80, 50], 2)).toBe(80 + 8 + 50);
+  });
+
   it('filters and totals respect player / town / unit', () => {
     const snaps: GgPlayerSnap[] = [
       { playerId: 1, playerName: 'Ana', mine: true, ts: 1, recvAt: 1, towns: [town(1, { n: 'Sparta', home: { sword: 5 }, total: { sword: 5, bireme: 3 }, sup: { hoplite: 2 } }), town(2, { n: 'Athens', total: { slinger: 8 }, home: { slinger: 8 } })] },
@@ -183,7 +227,7 @@ describe('GrepoGod HTTP API', () => {
     } finally { app.hub.stop(); srv.close(); }
   });
   it('EN and GR strings for the Troops tab and the slash command exist', () => {
-    for (const k of ['tabTroops', 'atHome', 'inTown', 'totalIncl', 'supportIn', 'allianceTotals', 'wall'] as const) {
+    for (const k of ['tabTroops', 'atHome', 'inTown', 'totalIncl', 'supportIn', 'allianceTotals', 'wall', 'resRow', 'spellsRow', 'resWood', 'warehouse', 'freePop'] as const) {
       expect(WEB_STRINGS.en[k]).toBeTruthy();
       expect(WEB_STRINGS.el[k]).toBeTruthy();
       expect(WEB_STRINGS.el[k]).not.toBe(WEB_STRINGS.en[k]);

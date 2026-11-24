@@ -36,8 +36,24 @@ const items = Array.from({ length: N }, (_, i) => {
   const sp = snap.players.get(s.playerId!)!, tp = snap.players.get(tgt.playerId!)!;
   return { es_id: `c${i}`, arrival_at: now + 45 + i * 97, type: TYPES[i % TYPES.length], src_twn_id: s.id, src_twn_n: s.name, src_ply_n: sp.name, src_ply_id: sp.id, src_all_id: sp.allianceId, src_all_n: snap.alliances.get(sp.allianceId!)?.name,
     trg_twn_id: tgt.id, trg_twn_n: tgt.name, trg_ply_n: tp.name, trg_ply_id: tp.id, trg_all_id: tp.allianceId, trg_all_n: snap.alliances.get(tp.allianceId!)?.name, units: TYPES[i % TYPES.length] === 'support' && i % 3 === 0 ? {} : UNITS[i % UNITS.length], // some supports hide their units in the share
-    upload_n: UPLOADERS[i % UPLOADERS.length], own_command: !inc, return: i % 13 === 12 };
+    upload_n: UPLOADERS[i % UPLOADERS.length], own_command: !inc, return: i % 13 === 12, subtype: TYPES[i % TYPES.length] === 'attack_takeover' ? (i % 3 ? 'command' : 'attack_takeover') : 'default',
+    cancel_human: i % 5 === 1 ? '23:50:04 Nov 24' : '', started_at: now - 600 };
 });
+// GrepoData variety (raw API shape): fresh own attack (cancelable → has cancel_human), colonization, ongoing revolt, planned, spy, hidden.
+{
+  const o = ours[0], e = them[0], op = snap.players.get(o.playerId!)!, ep = snap.players.get(e.playerId!)!;
+  const end = (p: 'src' | 'trg', t: typeof o, pl: typeof op) => ({ [`${p}_twn_id`]: t.id, [`${p}_twn_n`]: t.name, [`${p}_ply_id`]: pl.id, [`${p}_ply_n`]: pl.name, [`${p}_all_id`]: pl.allianceId, [`${p}_all_n`]: snap.alliances.get(pl.allianceId!)?.name });
+  const base = (id: string, at: number, over: Record<string, unknown>) => ({ es_id: id, cmd_id: id, arrival_at: now + at, started_at: now - 200, upload_n: 'crashpoum99', own_command: true, return: false, subtype: 'default', delete_status: '', ...end('src', o, op), ...end('trg', e, ep), ...over });
+  items.push(
+    base('fresh', 20, { type: 'attack_land', cancel_human: '23:56:44 Nov 24', cancelable: true, units: { sword: 300, slinger: 500, catapult: 5 } }) as never,
+    base('colo', 75, { type: 'foundation', subtype: 'cs_eta', units: { colonize_ship: 1 }, trg_twn_n: '16.2', trg_ply_id: 0, trg_ply_n: '' }) as never,
+    base('siege', 130, { type: 'attack_takeover', subtype: 'attack_takeover', units: { colonize_ship: 1, sword: 200, hoplite: 300 }, ...end('src', e, ep), ...end('trg', o, op), own_command: false, upload_n: 'Scout' }) as never,
+    base('rev', 900, { type: 'revolt', subtype: 'ongoing_revolt', started_at: now + 160, cancel_human: '00:10 Nov 25', units: {} }) as never,
+    base('plan', 2400, { type: 'attack_land', is_planned: true, started_at: now + 1200, cancel_human: '00:05 Nov 25', units: { rider: 200 } }) as never,
+    base('spy', 200, { type: 'attack_spy', units: '12000' }) as never,
+    base('sup', 260, { type: 'support', cancel_human: '23:58 Nov 24', units: { hoplite: 400, archer: 150 } }) as never,
+  );
+}
 const fakeGd = (async (u: string) => {
   const url = String(u);
   const j = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });

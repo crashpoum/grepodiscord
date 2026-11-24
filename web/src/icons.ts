@@ -5,6 +5,7 @@
  */
 export type UnitCat = 'land' | 'naval' | 'myth' | 'hero';
 interface UnitDef { cat: UnitCat; glyph?: string; code: string }
+import { describeCommand, GP_CMD_ICONS, type CmdIcon, type CmdKind } from '../../src/web/cmdKind.js';
 
 const LAND: Record<string, UnitDef> = {
   militia: { cat: 'land', glyph: 'militia', code: 'Mi' }, sword: { cat: 'land', glyph: 'sword', code: 'Sw' }, slinger: { cat: 'land', glyph: 'sling', code: 'Sl' },
@@ -68,16 +69,12 @@ const T: Record<string, [string, string]> = {
   spy: ['#3a3f47', '<path d="M2 12c4-6 16-6 20 0-4 6-16 6-20 0z" fill="#fff"/><circle cx="12" cy="12" r="3" fill="#3a3f47"/>'],
   other: ['#6b6f76', '<circle cx="12" cy="12" r="4" fill="#fff"/>'],
 };
-export type CmdKind = keyof typeof T;
+export type { CmdKind } from '../../src/web/cmdKind.js';
+/** Own fallback icon for each kind (used when the official sprite is unavailable). */
+const FALLBACK: Record<CmdKind, keyof typeof T> = { attack: 'attack', support: 'support', revolt: 'revolt', conquest: 'conquest', siege: 'conquest', colonize: 'conquest', spy: 'spy', farm: 'attack', return: 'return', other: 'other' };
+/** Kind of a command from its raw type fields (see src/web/cmdKind.ts). */
 export function cmdKind(type: string, sub: string, ret: boolean): CmdKind {
-  const t = `${type} ${sub}`.toLowerCase();
-  if (ret || t.includes('return') || t.includes('abort')) return 'return';
-  if (t.includes('takeover') || t.includes('conquer') || t.includes('colon')) return 'conquest';
-  if (t.includes('revolt')) return 'revolt';
-  if (t.includes('support')) return 'support';
-  if (t.includes('espionage') || t.includes('spy')) return 'spy';
-  if (t.includes('attack') || t.includes('breach') || t.includes('siege')) return 'attack';
-  return 'other';
+  return describeCommand({ type, sub, ret, planned: false, started: null, arrival: 0 }, 0).kind;
 }
 
 let injected = false;
@@ -113,11 +110,11 @@ export const GP_POS: Record<string, [number, number]> = {
   rekonos: [0, 7], rider: [1, 7], satyr: [2, 7], sea_monster: [3, 7], siren: [4, 7], slinger: [5, 7], small_transporter: [6, 7], spartoi: [7, 7], unknown_hero: [8, 7],
   unknown_naval: [0, 8], urephon: [1, 8], vedouma: [2, 8], xanthos: [3, 8], ylestres: [4, 8], zuretha: [5, 8], zyklop: [6, 8],
 };
-/** Order of the command-type strip at /gpcdn/cmds.png (src/web/gpcdn.ts GP_CMD_FILES). */
-export const GP_CMD_ORDER: CmdKind[] = ['attack', 'support', 'revolt', 'conquest', 'return', 'spy'];
+/** Order of the command-type strip at /gpcdn/cmds.png (shared with the server: src/web/cmdKind.ts). */
+export const GP_CMD_ORDER: readonly CmdIcon[] = GP_CMD_ICONS;
 /** Which official sprites loaded in this browser (set by loadOfficialIcons; false = own SVGs). */
 export const gp = { units: false, cmds: false };
-const UNITS_URL = `/gpcdn/units.jpg?v=${GP_UNITS_VERSION}`, CMDS_URL = `/gpcdn/cmds.png?v=${GP_UNITS_VERSION}`;
+const UNITS_URL = `/gpcdn/units.jpg?v=${GP_UNITS_VERSION}`, CMDS_URL = `/gpcdn/cmds.png?v=${GP_UNITS_VERSION}-${GP_CMD_ICONS.length}`;
 /** Probe both sprites once (lazy, cached by the browser); resolves true if anything changed. Never throws. */
 export function loadOfficialIcons(timeoutMs = 8000): Promise<boolean> {
   if (typeof Image === 'undefined') return Promise.resolve(false);
@@ -142,9 +139,10 @@ export function unitIcon(id: string, title: string, size = 20): string {
   const inner = d.glyph ? `<use href="#g-${d.glyph}"/>` : `<text x="12" y="16.5" text-anchor="middle" font-size="${d.code.length > 2 ? 9 : 11}" font-weight="700" fill="#fff" font-family="system-ui,sans-serif">${esc(d.code)}</text>`;
   return `<svg class="ui u-${d.cat}" width="${size}" height="${size}" viewBox="0 0 24 24" role="img" aria-label="${esc(title)}"><title>${esc(title)}</title><rect width="24" height="24" rx="4" fill="${CAT_BG[d.cat]}"/>${inner}</svg>`;
 }
-export function typeIcon(kind: CmdKind, title: string, size = 30): string {
-  const i = gp.cmds ? GP_CMD_ORDER.indexOf(kind) : -1;
+/** Official command icon (GrepoData's choice per type/revolt phase), or the own SVG for the kind. */
+export function typeIcon(kind: CmdKind, title: string, size = 30, icon: CmdIcon | null = null): string {
+  const i = gp.cmds && icon ? GP_CMD_ORDER.indexOf(icon) : -1;
   if (i >= 0) return `<span class="gpt" role="img" aria-label="${esc(title)}" title="${esc(title)}" style="width:${size}px;height:${size}px;background:url(${CMDS_URL}) ${-i * size}px 0/${GP_CMD_ORDER.length * size}px ${size}px no-repeat"></span>`;
-  return `<svg class="ti" width="${size}" height="${size}" role="img" aria-label="${esc(title)}"><title>${esc(title)}</title><use href="#t-${kind}"/></svg>`;
+  return `<svg class="ti" width="${size}" height="${size}" role="img" aria-label="${esc(title)}"><title>${esc(title)}</title><use href="#t-${FALLBACK[kind] ?? 'other'}"/></svg>`;
 }
 export const playerIcon = '<svg class="pi" width="12" height="12" aria-hidden="true"><use href="#i-player"/></svg>';

@@ -132,7 +132,7 @@ describe('islands', () => {
 
 describe('live overview helpers', () => {
   const end = (town: string, player: string, id: number) => ({ town, townId: id, player, playerId: id, alliance: 'A', allianceId: 1 });
-  const cmd = (id: string, over: Partial<LiveCommand>): LiveCommand => ({ id, type: 'attack', sub: '', arrival: 1000, started: null, src: end('S', 'Enemy', 1), trg: end('T', 'Me', 2), units: [['sword', 5]], by: 'Up', own: false, ret: false, planned: false, side: 'in', ...over });
+  const cmd = (id: string, over: Partial<LiveCommand>): LiveCommand => ({ id, type: 'attack', sub: '', arrival: 1000, started: null, src: end('S', 'Enemy', 1), trg: end('T', 'Me', 2), units: [['sword', 5]], by: 'Up', own: false, ret: false, planned: false, side: 'in', strat: '', deleted: false, silver: null, ...over });
   const all = [
     cmd('a', { arrival: 1000 }),
     cmd('b', { arrival: 900, type: 'support', units: [['bireme', 3]] }),
@@ -165,8 +165,9 @@ describe('live overview helpers', () => {
     expect(fmtCountdown(-5)).toBe('0:00:00');
     expect(cmdKind('attack', '', false)).toBe('attack');
     expect(cmdKind('support', '', false)).toBe('support');
-    expect(cmdKind('attack', 'revolt', false)).toBe('revolt');
-    expect(cmdKind('attack', 'takeover', false)).toBe('conquest');
+    expect(cmdKind('revolt', 'default', false)).toBe('revolt');
+    expect(cmdKind('attack_takeover', 'command', false)).toBe('conquest');
+    expect(cmdKind('attack_takeover', 'attack_takeover', false)).toBe('siege');
     expect(cmdKind('attack', '', true)).toBe('return');
     expect(cmdKind('espionage', '', false)).toBe('spy');
   });
@@ -185,7 +186,7 @@ describe('live overview helpers', () => {
 describe('/live saved views and multi-select filters', () => {
   const end = (town: string, player: string, alliance: string) => ({ town, townId: town.length, player, playerId: player.length, alliance, allianceId: alliance.length });
   const cmd = (id: string, src: ReturnType<typeof end>, trg: ReturnType<typeof end>, by: string, units: [string, number][] = [['sword', 1]]): LiveCommand =>
-    ({ id, type: 'attack', sub: '', arrival: 1000, started: null, src, trg, units, by, own: false, ret: false, planned: false, side: 'in' });
+    ({ id, type: 'attack', sub: '', arrival: 1000, started: null, src, trg, units, by, own: false, ret: false, planned: false, side: 'in', strat: '', deleted: false, silver: null });
   const all = [
     cmd('a', end('S1', 'Enemy', 'RED'), end('T1', 'Me', 'BLUE'), 'Scout'),
     cmd('b', end('S2', 'Enemy2', 'RED'), end('T2', 'You', 'BLUE'), 'Kleon'),
@@ -250,13 +251,14 @@ describe('official Grepolis icons (runtime, with own fallback)', () => {
   it('uses the sprite when it loaded, the own SVG otherwise', () => {
     gp.units = false; gp.cmds = false;
     expect(unitIcon('sword', 'Sword')).toContain('<svg');
-    expect(typeIcon('attack', 'Attack')).toContain('<svg');
+    expect(typeIcon('attack', 'Attack', 30, 'attack_land')).toContain('<svg');
     gp.units = true; gp.cmds = true;
     try {
       const u = unitIcon('sword', 'Sword', 20);
       expect(u).toContain('/gpcdn/units.jpg'); expect(u).toContain('-160px 0px/180px 180px');
       expect(unitIcon('brand_new_unit', 'X')).toContain('<svg'); // unknown → own icon
-      expect(typeIcon('support', 'Support', 30)).toContain('-30px 0/180px');
+      expect(typeIcon('support', 'Support', 30, 'support')).toContain(`${-30 * GP_CMD_ORDER.indexOf('support')}px 0/${30 * GP_CMD_ORDER.length}px`);
+      expect(typeIcon('support', 'Support', 30)).toContain('<svg'); // no official icon name → own SVG
       expect(typeIcon('other', 'Other')).toContain('<svg');
     } finally { gp.units = false; gp.cmds = false; }
   });

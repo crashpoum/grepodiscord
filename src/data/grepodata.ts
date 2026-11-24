@@ -45,6 +45,7 @@ export interface GdSharedCommand {
   src_twn_id?: number; src_twn_n?: string; src_ply_id?: number; src_ply_n?: string; src_all_id?: number; src_all_n?: string;
   trg_twn_id?: number; trg_twn_n?: string; trg_ply_id?: number; trg_ply_n?: string; trg_all_id?: number; trg_all_n?: string;
   units?: Record<string, number | string> | string; upload_n?: string; own_command?: boolean; return?: boolean; delete_status?: string; cancel_human?: string; comments?: unknown[]; is_planned?: boolean;
+  cmd_id?: string; arrival_human?: string; attacking_strategy?: string; upload_id?: number; team?: string; cancelable?: boolean;
 }
 export interface GdTeamCommands { success?: boolean; success_code?: number; count?: number; updated_at?: number; is_admin?: boolean; items?: GdSharedCommand[] }
 export interface GdIndexOverview {

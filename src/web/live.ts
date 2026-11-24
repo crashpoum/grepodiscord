@@ -11,6 +11,7 @@ import { classifyError, logError } from '../bot/errors.js';
 import { t, type Lang, type StringKey } from '../i18n.js';
 import { config } from '../config.js';
 import { log } from '../log.js';
+import { describeCommand } from './cmdKind.js';
 
 export type { LiveEnd, LiveCommand, LiveIntel, LiveTeam, LiveView } from './types.js';
 import type { LiveCommand, LiveEnd, LiveIntel, LiveProblem, LiveTeam, LiveView } from './types.js';
@@ -65,28 +66,50 @@ export function normUnits(u: unknown): [string, number][] {
 
 export function toLiveCommand(c: GdSharedCommand, ours: Set<number>): LiveCommand {
   const end = (p: 'src' | 'trg'): LiveEnd => ({
-    town: str(c[`${p}_twn_n`]), townId: num(c[`${p}_twn_id`]), player: str(c[`${p}_ply_n`]), playerId: num(c[`${p}_ply_id`]),
-    alliance: str(c[`${p}_all_n`]), allianceId: num(c[`${p}_all_id`]),
+    town: str(c[`${p}_twn_n`]), townId: num(c[`${p}_twn_id`]) || null, player: str(c[`${p}_ply_n`]), playerId: num(c[`${p}_ply_id`]) || null,
+    alliance: str(c[`${p}_all_n`]), allianceId: num(c[`${p}_all_id`]) || null,
   });
   const src = end('src'), trg = end('trg');
   const srcOurs = src.allianceId !== null && ours.has(src.allianceId);
   const trgOurs = trg.allianceId !== null && ours.has(trg.allianceId);
+  const spy = str(c.type) === 'attack_spy';
   return {
-    id: str(c.es_id), type: str(c.type), sub: str(c.subtype), arrival: Number(c.arrival_at) || 0, started: num(c.started_at), src, trg,
-    units: normUnits(c.units), by: str(c.upload_n), own: !!c.own_command, ret: !!c.return, planned: !!c.is_planned,
+    id: str(c.es_id) || `${str(c.cmd_id)}:${str(c.arrival_at)}`, type: str(c.type), sub: str(c.subtype), arrival: Number(c.arrival_at) || 0, started: num(c.started_at), src, trg,
+    units: spy ? [] : normUnits(c.units), by: str(c.upload_n), own: !!c.own_command, ret: !!c.return, planned: !!c.is_planned,
     side: trgOurs && !srcOurs ? 'in' : srcOurs && !trgOurs ? 'out' : 'other',
+    strat: str(c.attacking_strategy), deleted: !!c.delete_status && c.delete_status !== '', silver: spy ? num(c.units) : null,
   };
 }
 
-/** Commands still relevant: not deleted/cancelled and arriving no earlier than 60 s ago; soonest first. */
-export function activeCommands(all: Iterable<GdSharedCommand>, ours: Set<number>, nowSec: number, limit = 300): LiveCommand[] {
-  const out: LiveCommand[] = [];
-  for (const c of all) {
-    if (c.delete_status === 'hard' || c.delete_status === 'soft' || c.cancel_human) continue;
-    if (!(Number(c.arrival_at) >= nowSec - 60)) continue;
-    out.push(toLiveCommand(c, ours));
+export type DropReason = 'deleted' | 'arrived' | 'departed';
+/**
+ * Everything GrepoData would show, soonest first (by countdown: an arising revolt counts down to its phase 2 start).
+ * Exactly GrepoData's own rules: only hard-deleted commands, commands that already arrived (60 s grace) and planned
+ * commands whose departure passed are left out. No side, type or direction filtering here: that is the viewer's own
+ * view filters. (`cancel_human` is "cancelable until" / planned departure / revolt phase 2, never a cancellation.)
+ */
+export function activeCommands(all: Iterable<GdSharedCommand>, ours: Set<number>, nowSec: number, limit = 5000): LiveCommand[] {
+  return selectCommands(all, ours, nowSec, limit).commands;
+}
+export function selectCommands(all: Iterable<GdSharedCommand>, ours: Set<number>, nowSec: number, limit = 5000): { commands: LiveCommand[]; fetched: number; dropped: Record<DropReason, number>; cut: number } {
+  const out: { c: LiveCommand; at: number }[] = [];
+  const dropped: Record<DropReason, number> = { deleted: 0, arrived: 0, departed: 0 };
+  const seen = new Set<string>();
+  let fetched = 0;
+  for (const raw of all) {
+    if (!raw) continue;
+    fetched++;
+    if (raw.delete_status === 'hard') { dropped.deleted++; continue; }
+    const c = toLiveCommand(raw, ours);
+    if (!(c.arrival >= nowSec - 60)) { dropped.arrived++; continue; }
+    if (c.planned && c.started !== null && c.started > 0 && c.started <= nowSec) { dropped.departed++; continue; }
+    const dk = raw.cmd_id ? `${raw.cmd_id}|${c.arrival}` : c.id; // GrepoData ids include the team: the same command shared in two of our teams
+    if (seen.has(dk)) continue;
+    seen.add(dk);
+    out.push({ c, at: describeCommand(c, nowSec).countdownAt });
   }
-  return out.sort((a, b) => a.arrival - b.arrival).slice(0, limit);
+  out.sort((a, b) => a.at - b.at || (a.c.started ?? 0) - (b.c.started ?? 0));
+  return { commands: out.slice(0, limit).map((x) => x.c), fetched, dropped, cut: Math.max(0, out.length - limit) };
 }
 
 export class Budget {
@@ -194,9 +217,12 @@ export class LiveHub {
 
   /** One log line when the result changes (count, teams or error), not on every 5 s poll. */
   private logResult(guildId: string, s: GuildLive) {
-    let count = 0;
-    for (const m of s.cmds.values()) count += m.size;
-    const line = s.err ? `error ${s.err.key}` : `${count} active command(s) in ${s.teams.length} team(s)`;
+    const all: GdSharedCommand[] = [];
+    for (const m of s.cmds.values()) all.push(...m.values());
+    const sel = selectCommands(all, new Set(), Math.floor(this.opts.now() / 1000));
+    const count = sel.commands.length;
+    const drops = Object.entries(sel.dropped).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(', ');
+    const line = s.err ? `error ${s.err.key}` : `${count} active command(s) in ${s.teams.length} team(s) (fetched ${sel.fetched}, shown ${count}${drops ? `, dropped: ${drops}` : ''}${sel.cut ? `, cut ${sel.cut}` : ''})`;
     if (line === s.lastLog) { log.debug(`live: guild ${guildId} ${s.world ?? '-'}: ${line}`); return; }
     s.lastLog = line;
     const delta = !s.err && s.lastCount !== null && s.lastCount !== count ? ` (${count > s.lastCount ? '+' : ''}${count - s.lastCount})` : '';
@@ -230,7 +256,7 @@ export class LiveHub {
       if (v.updated_at) s.since.set(team.key, Number(v.updated_at));
       if (v.success_code === 8010) continue;
       const m = full ? new Map<string, GdSharedCommand>() : s.cmds.get(team.key) ?? new Map<string, GdSharedCommand>();
-      for (const c of v.items ?? []) if (c?.es_id) m.set(String(c.es_id), c);
+      for (const c of v.items ?? []) if (c && (c.es_id || c.cmd_id)) m.set(String(c.es_id || `${c.cmd_id}:${c.arrival_at}`), c);
       const cutoff = Math.floor(now / 1000) - 300;
       for (const [id, c] of m) if (Number(c.arrival_at) < cutoff || c.delete_status === 'hard') m.delete(id);
       s.cmds.set(team.key, m);

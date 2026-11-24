@@ -223,3 +223,20 @@ ul.picker { list-style:none; padding:0; display:flex; flex-direction:column; gap
 .dmsg { max-width:200px; background:#3b2a14; color:#fff; font-size:12px; padding:5px 8px; border-radius:6px; }
 .dtext { position:absolute; z-index:3; min-width:180px; font:600 15px system-ui, sans-serif; background:rgba(20,30,40,.85); border:1px solid #ffd23f; border-radius:4px; padding:3px 6px; outline:none; }
 @media (max-width:760px) { .drawbar { top:auto; bottom:64px; max-height:calc(100% - 140px); } .dtools { width:104px; } }
+/* command kinds (GrepoData-style differentiation) */
+.gr.k-support { box-shadow:inset 4px 0 0 #2a6fb5; }
+.gr.k-siege { background:#ead6f2; box-shadow:inset 4px 0 0 #6b2fa0; } .gr.k-siege.odd { background:#e1c8ec; }
+.gr.k-conquest, .gr.k-colonize { box-shadow:inset 4px 0 0 #6b2fa0; }
+.gr.k-revolt { box-shadow:inset 4px 0 0 #d06a16; }
+.gr.k-return { opacity:.8; } .gr.k-return .cd { color:#5d5d5d; }
+.gr.atk { box-shadow:inset 4px 0 0 #b3261e; }
+.gr.planned { background-image:repeating-linear-gradient(135deg, transparent 0 10px, rgba(90,70,38,.07) 10px 20px); }
+.gr.deleted { opacity:.55; }
+.gr .tag.t-siege { background:#6b2fa0; color:#fff; } .gr .tag.t-revoltArising, .gr .tag.t-revoltRunning { background:#d06a16; color:#fff; }
+.gr .tag.t-del { background:#8a7a5a; color:#fff; }
+.gr-u .silver { flex-direction:row; gap:2px; font-size:12px; align-items:center; }
+.gd-strip .tl { color:#f3e3b5; font-size:12px; white-space:nowrap; align-self:center; margin-right:4px; }
+.gd-strip button { position:relative; }
+.gd-strip button i { position:absolute; right:1px; bottom:1px; font-style:normal; font-size:10px; font-weight:700; line-height:1; color:#fff; text-shadow:0 0 2px #000, 0 0 2px #000; font-variant-numeric:tabular-nums; }
+.gd-strip button.zero { opacity:.35; }
+.gd-strip .unkn { color:#f3e3b5; font-size:11px; white-space:nowrap; align-self:center; margin-left:6px; }

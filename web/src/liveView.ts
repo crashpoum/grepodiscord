@@ -6,11 +6,33 @@
  */
 import type { LiveCommand, LiveView } from '../../src/web/types.js';
 import type { WebKey, WebLang } from '../../src/web/strings.js';
-import { cmdKind, injectSprite, loadOfficialIcons, playerIcon, typeIcon, unitDef, unitIcon, UNIT_ORDER, type CmdKind } from './icons.js';
+import { injectSprite, loadOfficialIcons, playerIcon, typeIcon, unitDef, unitIcon, UNIT_ORDER, type CmdKind } from './icons.js';
+import { describeCommand, HOSTILE, type CmdInfo } from '../../src/web/cmdKind.js';
 import { activeView, closeView, createView, DEFAULT_ID, emptyFilters, loadViews, renameView, saveViews, selectView, storageKey, updateActive, type Group, type Sel, type ViewFilters, type ViewState } from './views.js';
 
 interface Opts { L: (k: WebKey, v?: Record<string, string | number>) => string; esc: (s: unknown) => string; lang: WebLang; units: Record<string, string>; user: string | null; world?: string | null; storage?: Pick<Storage, 'getItem' | 'setItem'> | null }
-type Row = { h: true; key: string; label: string; n: number; first: number } | { h: false; c: LiveCommand; k: CmdKind };
+type Row = { h: true; key: string; label: string; n: number; first: number } | { h: false; c: LiveCommand; k: CmdKind; d: CmdInfo };
+/** Kind/icon/label of a command, computed once per received command object. */
+const infos = new WeakMap<LiveCommand, CmdInfo>();
+export function infoOf(c: LiveCommand, nowSec = Date.now() / 1000): CmdInfo {
+  let d = infos.get(c);
+  if (!d) infos.set(c, (d = describeCommand(c, nowSec)));
+  return d;
+}
+/**
+ * GrepoData's "Total units" bar: units summed over the commands currently shown (after every view filter), leaving out
+ * hidden (soft-deleted) commands; commands whose units are not shared are counted separately.
+ */
+export function totalUnits(cmds: LiveCommand[]): { units: Map<string, number>; unknown: number } {
+  const units = new Map<string, number>();
+  let unknown = 0;
+  for (const c of cmds) {
+    if (c.deleted) continue;
+    if (!c.units.length) { if (c.silver === null) unknown++; continue; }
+    for (const [u, n] of c.units) units.set(u, (units.get(u) ?? 0) + n);
+  }
+  return { units, unknown };
+}
 
 const ROW = 48;
 const OVERSCAN = 6;
@@ -38,7 +60,7 @@ export function filterCommands(all: LiveCommand[], f: Filters): LiveCommand[] {
   const sets = MS_KEYS.map((k) => [k, new Set(f[k].values)] as const);
   const units = new Set(f.units);
   return all.filter((c) => {
-    const k = cmdKind(c.type, c.sub, c.ret);
+    const k = infoOf(c).kind;
     if (!f.returns && k === 'return') return false;
     if (!f.support && k === 'support') return false;
     if (!f.outgoing && c.side === 'out') return false;
@@ -51,7 +73,7 @@ export function filterCommands(all: LiveCommand[], f: Filters): LiveCommand[] {
   });
 }
 export function groupRows(cmds: LiveCommand[], g: Group): Row[] {
-  const rows = (cs: LiveCommand[]) => cs.map((c): Row => ({ h: false, c, k: cmdKind(c.type, c.sub, c.ret) }));
+  const rows = (cs: LiveCommand[]) => cs.map((c): Row => { const d = infoOf(c); return { h: false, c, k: d.kind, d }; });
   if (g === 'none') return rows(cmds);
   const key = (c: LiveCommand): [string, string] => {
     if (g === 'target') return [`t${c.trg.townId ?? c.trg.town}`, `${c.trg.town} (${c.trg.player})`];
@@ -73,7 +95,7 @@ export function targetCards(cmds: LiveCommand[], incomingOnly: boolean): TargetC
   const m = new Map<string, TargetCard & { sum: number }>();
   for (const c of cmds) {
     if (incomingOnly && c.side !== 'in') continue;
-    if (cmdKind(c.type, c.sub, c.ret) === 'return') continue;
+    if (infoOf(c).kind === 'return') continue;
     const k = String(c.trg.townId ?? c.trg.town);
     let e = m.get(k);
     if (!e) m.set(k, (e = { id: c.trg.townId, key: k, town: c.trg.town, player: c.trg.player, alliance: c.trg.alliance, n: 0, avg: 0, first: c.arrival, sum: 0 }));
@@ -83,6 +105,8 @@ export function targetCards(cmds: LiveCommand[], incomingOnly: boolean): TargetC
 }
 
 
+const KIND_LABEL: Record<CmdKind, WebKey> = { attack: 'typeAttack', support: 'typeSupport', revolt: 'typeRevolt', conquest: 'typeConquest', siege: 'typeSiege', colonize: 'typeColonize', spy: 'typeSpy', farm: 'typeFarm', return: 'typeReturn', other: 'typeOther' };
+const BADGE_LABEL: Record<CmdInfo['badges'][number], WebKey> = { siege: 'badgeSiege', revoltArising: 'badgeRevoltArising', revoltRunning: 'badgeRevoltRunning', returning: 'badgeReturning', planned: 'planned', quest: 'badgeQuest', temple: 'badgeTemple', portal: 'badgePortal', spot: 'badgeSpot' };
 const MS_LABEL: Record<MsKey, WebKey> = { towns: 'selectTowns', players: 'selectPlayers', alliances: 'selectAlliances', uploaders: 'uploadedBy' };
 
 export class LiveScreen {
@@ -263,19 +287,22 @@ export class LiveScreen {
   }
 
   private renderStrip() {
-    const tot = new Map<string, number>();
-    for (const c of this.data!.commands) for (const [u, n] of c.units) tot.set(u, (tot.get(u) ?? 0) + n);
-    const key = `${[...tot.keys()].sort().join(',')}|${this.f.units.join(',')}`;
+    const { L, esc } = this.o;
+    const all = new Set<string>();
+    for (const c of this.data!.commands) for (const [u] of c.units) all.add(u);
+    for (const u of this.f.units) all.add(u);
+    const { units: tot, unknown } = totalUnits(this.filtered);
+    const key = `${[...all].sort().join(',')}|${[...tot].join(',')}|${unknown}|${this.f.units.join(',')}`;
     if (key === this.stripKey) return;
     this.stripKey = key;
     const order = (a: string, b: string) => (UNIT_ORDER.indexOf(a) + 1 || 999) - (UNIT_ORDER.indexOf(b) + 1 || 999);
-    const btn = (u: string) => `<button class="${this.f.units.includes(u) ? 'on' : ''}" data-u="${this.o.esc(u)}">${unitIcon(u, this.o.units[u] ?? u, 22)}</button>`;
-    const ids = [...tot.keys()].sort(order);
+    const nf = new Intl.NumberFormat(this.o.lang === 'el' ? 'el-GR' : 'en-GB');
+    const btn = (u: string) => { const n = tot.get(u) ?? 0; const name = this.o.units[u] ?? u; return `<button class="${this.f.units.includes(u) ? 'on' : ''}${n ? '' : ' zero'}" data-u="${esc(u)}" title="${esc(`${name}: ${nf.format(n)}`)}">${unitIcon(u, name, 26)}<i>${n ? nf.format(n) : ''}</i></button>`; };
+    const ids = [...all].sort(order);
     const left = ids.filter((u) => ['land', 'hero'].includes(unitDef(u).cat)), right = ids.filter((u) => !['land', 'hero'].includes(unitDef(u).cat));
-    this.el.strip.querySelector('.l')!.innerHTML = left.map(btn).join('');
-    this.el.strip.querySelector('.r')!.innerHTML = right.map(btn).join('');
+    this.el.strip.querySelector('.l')!.innerHTML = `<b class="tl">${esc(L('totalUnits'))}</b>${left.map(btn).join('')}`;
+    this.el.strip.querySelector('.r')!.innerHTML = right.map(btn).join('') + (unknown ? `<span class="unkn" title="${esc(L('unitsUnknown'))}">${esc(L('plusUnknown', { n: unknown }))}</span>` : '');
   }
-
   private renderSide() {
     const { L, esc } = this.o;
     const all = targetCards(this.data!.commands, this.incomingOnly);
@@ -308,7 +335,7 @@ export class LiveScreen {
     const [fT, fD] = this.fmt;
     const nowS = Date.now() / 1000;
     const t0 = performance.now();
-    const end = (e: LiveCommand['src']) => `<b class="town">${esc(e.town || '?')}</b> (<span class="ply">${playerIcon}${esc(e.player || '?')}</span>)`;
+    const end = (e: LiveCommand['src']) => `<b class="town">${esc(e.town || '?')}</b>${e.player ? ` (<span class="ply">${playerIcon}${esc(e.player)}</span>)` : ''}`;
     const out: string[] = [];
     for (let i = a; i < b; i++) {
       const r = this.rows[i];
@@ -318,15 +345,25 @@ export class LiveScreen {
       const key = `${i}|${c.id === this.selected ? 1 : 0}|${soon ? 1 : 0}`;
       const hit = this.rowCache.get(c);
       if (hit && hit.key === key) { out.push(hit.html); continue; }
-      const arr = new Date(c.arrival * 1000);
-      const at = `${fT.format(arr)} ${fD.format(arr)}`;
-      const atk = r.k === 'attack' || r.k === 'conquest' || r.k === 'revolt';
-      const cls = `gr ${i % 2 ? 'odd' : ''} ${atk && c.side === 'in' ? 'atk' : ''} ${atk && c.side === 'in' && soon ? 'soon' : ''} ${c.id === this.selected ? 'sel' : ''} s-${c.side}`;
-      const kindTitle = L(r.k === 'attack' ? 'typeAttack' : r.k === 'support' ? 'typeSupport' : r.k === 'revolt' ? 'typeRevolt' : r.k === 'conquest' ? 'typeConquest' : r.k === 'return' ? 'typeReturn' : r.k === 'spy' ? 'typeSpy' : 'typeOther');
-      const html = (`<div class="${cls}" style="top:${i * ROW}px" data-id="${esc(c.id)}">${typeIcon(r.k, kindTitle)}
-        <div class="gr-m"><div class="l1">${end(c.src)} <span class="arrow">-&gt;</span> ${end(c.trg)}</div>
-        <div class="l2"><b class="cd" data-arr="${c.arrival}">${fmtCountdown(c.arrival - nowS)}</b> <span>${esc(L('arrivalAt', { t: at }))}</span>${c.by ? ` <span class="by">· ${esc(L('by', { n: c.by }))}</span>` : ''}${c.planned ? ` <span class="tag">${esc(L('planned'))}</span>` : ''}</div></div>
-        <div class="gr-u">${c.units.length ? c.units.slice(0, 8).map(([u, n]) => `<span>${unitIcon(u, this.o.units[u] ?? u, 18)}<i>${n}</i></span>`).join('') : `<span class="unk" title="${esc(L('unitsUnknown'))}" aria-label="${esc(L('unitsUnknown'))}">?</span>`}</div></div>`);
+      const d = r.d;
+      const when = (t: number) => { const x = new Date(t * 1000); return `${fT.format(x)} ${fD.format(x)}`; };
+      const at = when(c.arrival);
+      const hostileIn = HOSTILE.has(r.k) && c.side === 'in';
+      const cls = `gr ${i % 2 ? 'odd' : ''} k-${r.k} ${hostileIn ? 'atk' : ''} ${hostileIn && soon ? 'soon' : ''} ${c.planned ? 'planned' : ''} ${c.deleted ? 'deleted' : ''} ${c.id === this.selected ? 'sel' : ''} s-${c.side}`;
+      const kindTitle = L(KIND_LABEL[r.k]);
+      const time = d.label === 'planned' ? L('plannedAt', { dep: c.started ? when(c.started) : '?', t: at })
+        : d.label === 'revoltP2' ? `(${c.started && c.started * 1000 > Date.now() ? `${L('phase2Start', { t: when(c.started) })}, ` : ''}${L('phase2End', { t: at })})`
+        : L(d.label === 'conquered' ? 'conqueredAt' : d.label === 'colonized' ? 'colonizedAt' : d.label === 'arrivalPortal' ? 'arrivalPortalAt' : 'arrivalAt', { t: at });
+      const tags = d.badges.filter((b) => b !== 'planned').map((b) => `<span class="tag t-${b}">${esc(L(BADGE_LABEL[b]))}</span>`).join('')
+        + (c.planned ? ` <span class="tag">${esc(L('planned'))}</span>` : '') + (c.deleted ? ` <span class="tag t-del">${esc(L('hiddenCmd'))}</span>` : '');
+      const [a1, a2, arrow] = c.ret ? [c.trg, c.src, '&lt;-'] : [c.src, c.trg, '-&gt;'];
+      const units = c.silver !== null ? `<span class="silver" title="${esc(L('silver'))}">🪙<i>${c.silver.toLocaleString(loc)}</i></span>`
+        : c.units.length ? c.units.slice(0, 8).map(([u, n]) => `<span>${unitIcon(u, this.o.units[u] ?? u, 18)}<i>${n}</i></span>`).join('')
+        : `<span class="unk" title="${esc(L('unitsUnknown'))}" aria-label="${esc(L('unitsUnknown'))}">?</span>`;
+      const html = (`<div class="${cls}" style="top:${i * ROW}px" data-id="${esc(c.id)}">${typeIcon(r.k, kindTitle, 30, d.icon)}
+        <div class="gr-m"><div class="l1">${end(a1)} <span class="arrow">${arrow}</span> ${end(a2)} ${tags}</div>
+        <div class="l2"><b class="cd" data-arr="${d.countdownAt}">${fmtCountdown(d.countdownAt - nowS)}</b> <span>${esc(time)}</span>${c.by ? ` <span class="by">· ${esc(L('by', { n: c.by }))}</span>` : ''}</div></div>
+        <div class="gr-u">${units}</div></div>`);
       this.rowCache.set(c, { key, html });
       out.push(html);
     }

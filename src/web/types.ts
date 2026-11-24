@@ -1,6 +1,13 @@
 /** Shapes shared by the server and the browser bundle (no runtime code, no node imports). */
 export interface LiveEnd { town: string; townId: number | null; player: string; playerId: number | null; alliance: string; allianceId: number | null }
-export interface LiveCommand { id: string; type: string; sub: string; arrival: number; started: number | null; src: LiveEnd; trg: LiveEnd; units: [string, number][]; by: string; own: boolean; ret: boolean; planned: boolean; side: 'in' | 'out' | 'other' }
+export interface LiveCommand { id: string; type: string; sub: string; arrival: number; started: number | null; src: LiveEnd; trg: LiveEnd; units: [string, number][]; by: string; own: boolean; ret: boolean; planned: boolean; side: 'in' | 'out' | 'other';
+  /** GrepoData attacking_strategy (regular, breakthrough, revolt_arising, revolt_running...). */
+  strat: string;
+  /** Soft-deleted ("hidden") by its uploader: GrepoData only sends these to the uploader; shown dimmed, left out of totals. */
+  deleted: boolean;
+  /** Spy commands carry the silver paid instead of units. */
+  silver: number | null;
+}
 export interface LiveIntel { townId: number | null; town: string; player: string; alliance: string; date: string; units: [string, number][] }
 export interface LiveTeam { key: string; name: string; commands: number; players: number }
 export interface LiveView {

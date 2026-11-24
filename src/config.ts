@@ -50,7 +50,7 @@ export const config = {
   /** Optional Custom Link from the Activity app's portal; default https://discord.com/activities/<ACTIVITY_CLIENT_ID>. */
   activityLink: (env.ACTIVITY_LINK ?? '').trim(),
   /** Live window: seconds between command-share polls, and the share of the GrepoData budget it may use. */
-  livePollSeconds: Math.max(10, num(env.LIVE_POLL_SECONDS, 20)),
+  livePollSeconds: Math.max(3, num(env.LIVE_POLL_SECONDS, 5)),
   liveRpm: Math.max(2, num(env.LIVE_RPM, 12)),
   privacyContact: env.PRIVACY_CONTACT ?? '',
   logLevel: env.LOG_LEVEL ?? 'info',

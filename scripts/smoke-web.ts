@@ -20,14 +20,22 @@ store.setWarSide('G1', W, top[1].id, 'enemy');
 const exp = Date.now() + 3_600_000;
 store.setGdToken({ guildId: 'G1', accessToken: `x.${Buffer.from(JSON.stringify({ exp: exp / 1000 })).toString('base64url')}.y`, refreshToken: null, accessExp: exp, refreshExp: null, adminUserId: null, source: 'command' });
 const townsOf = (aid: number) => [...snap.towns.values()].filter((t) => t.playerId && snap.players.get(t.playerId)?.allianceId === aid);
+store.setWarSide('G1', W, top[2].id, 'ours'); // an ally (pact) besides our own alliance
 const ours = townsOf(top[0].id), them = townsOf(top[1].id);
 const now = Math.floor(Date.now() / 1000);
-const items = Array.from({ length: 12 }, (_, i) => {
-  const inc = i % 3 !== 0;
-  const s = inc ? them[i % them.length] : ours[i % ours.length], t = inc ? ours[(i * 7) % ours.length] : them[(i * 5) % them.length];
-  const sp = snap.players.get(s.playerId!)!, tp = snap.players.get(t.playerId!)!;
-  return { es_id: `c${i}`, arrival_at: now + 120 + i * 400, type: i % 4 === 1 ? 'support' : 'attack', src_twn_id: s.id, src_twn_n: s.name, src_ply_n: sp.name, src_all_id: sp.allianceId, src_all_n: snap.alliances.get(sp.allianceId!)?.name,
-    trg_twn_id: t.id, trg_twn_n: t.name, trg_ply_n: tp.name, trg_all_id: tp.allianceId, trg_all_n: snap.alliances.get(tp.allianceId!)?.name, units: { sword: 120 + i, slinger: 300, catapult: i % 2 }, upload_n: 'Scout' };
+const N = Number(process.env.SMOKE_COMMANDS ?? 60);
+const UNITS = [{ sword: 120, slinger: 300, catapult: 1 }, { hoplite: 400, archer: 250 }, { attack_ship: 60 }, { big_transporter: 12, rider: 200, chariot: 40, manticore: 12 },
+  { bireme: 80, trireme: 10 }, { colonize_ship: 1, big_transporter: 10, slinger: 400, sword: 50 }, { harpy: 30, griffin: 4, hercules: 1 }, { demolition_ship: 15, small_transporter: 8, medusa: 10 }];
+const TYPES = ['attack', 'attack', 'attack', 'support', 'attack_takeover', 'revolt', 'attack', 'support'];
+const UPLOADERS = ['Scout', 'Leonidas_GR', 'Ariadne', 'Kleon'];
+const items = Array.from({ length: N }, (_, i) => {
+  const inc = i % 4 !== 0;
+  const tgt = inc ? ours[(i * 7) % Math.min(12, ours.length)] : them[(i * 5) % them.length];
+  const s = inc ? them[(i * 3) % them.length] : ours[i % ours.length];
+  const sp = snap.players.get(s.playerId!)!, tp = snap.players.get(tgt.playerId!)!;
+  return { es_id: `c${i}`, arrival_at: now + 45 + i * 97, type: TYPES[i % TYPES.length], src_twn_id: s.id, src_twn_n: s.name, src_ply_n: sp.name, src_ply_id: sp.id, src_all_id: sp.allianceId, src_all_n: snap.alliances.get(sp.allianceId!)?.name,
+    trg_twn_id: tgt.id, trg_twn_n: tgt.name, trg_ply_n: tp.name, trg_ply_id: tp.id, trg_all_id: tp.allianceId, trg_all_n: snap.alliances.get(tp.allianceId!)?.name, units: UNITS[i % UNITS.length],
+    upload_n: UPLOADERS[i % UPLOADERS.length], own_command: !inc, return: i % 13 === 12 };
 });
 const fakeGd = (async (u: string) => {
   const url = String(u);

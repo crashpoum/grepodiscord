@@ -58,7 +58,10 @@ Intel comes from your **GrepoData account** (the one you use on grepodata.com wi
 - `/live` and `/map` open a small web app served by the bot container (`src/web`, bundle in `web/`). It runs inside Discord as an **Activity** of a *separate* Discord application, so the main bot is never touched by Activity rules. It also runs as a plain browser dashboard: a personal signed link (12 h) or *Sign in with Discord*.
 - It is published through a **Cloudflare named tunnel** (`cloudflared` compose service, `CLOUDFLARE_TUNNEL_TOKEN`). No ports are opened.
 - Unverified Activities only work in servers under 25 members, and only for the dev team and App Testers. Big servers use the browser link until the Activity app is verified.
-- GrepoData is polled once per server while someone is watching, cached server-side, and fanned out to all viewers, capped by `LIVE_RPM` (default 12/min, within `GREPODATA_RPM`).
+- GrepoData is polled once per server while someone is watching, cached server-side, and fanned out to all viewers: every `LIVE_POLL_SECONDS` (default 5 s), stretched to fit `LIVE_RPM` (default 12/min, within `GREPODATA_RPM`; 1 team → every 6 s), with back-off on errors and 429s. The header shows "updated Xs ago" and the poll status; a banner explains a missing/expired token, a failed refresh or no command-share team.
+- **/live** is a dense command overview (filters, group by target/attacker/our player, operation-target sidebar, unit filter strip). The list is virtualized and one 1-second timer drives every countdown.
+- **/map** draws the sea grid with ocean numbers, the real islands (official `islands.txt`, stylized shapes by island type) and every town coloured by side: our alliance blue, allies/pacts cyan, enemies red, others neutral. Zoom/pan, labels only when zoomed in, search, hover/click details and the conquest timeline. It renders on a canvas with cached tiles per zoom level and a spatial index.
+- Icons are GrepoCord's own inline SVG set (MIT, no InnoGames/GrepoData art, nothing hot-linked); every unit id maps to a glyph or a coded badge, unknown ones fall back by category.
 - Full step-by-step guide for the Discord portal and Cloudflare: **[SETUP-ACTIVITY.md](SETUP-ACTIVITY.md)**.
 
 ## AI features (Gemini, free tier only)
@@ -87,7 +90,7 @@ Roles: `/roles verified` sets a role for every linked member, and `/roles allian
   - per-endpoint caching: 10 min for info and scoreboards, 15 min for changes and conquests, 30 min for rankings and towns, 60 min for history and wars, 5 min for intel, 6 h for the world list
   - request de-duplication, stale-if-error, and exponential backoff with a global pause on 429/503
   - 4xx responses are never retried, which matters for 401s with their fail2ban
-  - the live window polls command share only while someone is watching, once per server for all viewers, capped at `LIVE_RPM` (default 12/min) inside the shared budget
+  - the live window polls command share only while someone is watching, once per server for all viewers, capped at `LIVE_RPM` (default 12/min, poll every 5–6 s) inside the shared budget
 
 ## Architecture
 ```
@@ -238,6 +241,7 @@ npm run build       # → compiled/ (+ web bundle in compiled/public)
 - GrepoData's public API is undocumented and could change. Lookups fall back to official data (without charts) if it fails.
 - GrepoData's `/town/radar` is centred on a town. For x/y coordinates the bot uses the nearest town as the anchor and filters by island distance itself.
 - Intel requires a GrepoData account that is a member of the relevant City Indexer teams. The bot only shows what that account can see.
-- The live window shows what the server's GrepoData account sees in its command-share teams for the world (up to 3 teams), refreshed every `LIVE_POLL_SECONDS`. It is not a game feed.
+- The live window shows what the server's GrepoData account sees in its command-share teams for the world (up to 3 teams), refreshed every `LIVE_POLL_SECONDS` (default 5 s, effectively 6 s per team under `LIVE_RPM=12`). It is not a game feed. Arrival times are shown in the viewer's browser time zone.
+- Map island shapes are stylized by island type (positions are exact); town positions inside an island are not public, so towns are spread around their island.
 - The map timeline replays the official conquers file backwards from today's owners. Towns founded later still appear at earlier times, and alliance switches without a conquest are not replayed.
 - The Discord Activity needs Discord's verification for servers with 25+ members. Until then, use the browser link (SETUP-ACTIVITY.md §5).

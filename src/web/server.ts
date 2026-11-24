@@ -14,13 +14,15 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Ctx } from '../services.js';
 import { config } from '../config.js';
 import { watchActivityApp } from './activityCheck.js';
 import { log } from '../log.js';
 import { t, type Lang } from '../i18n.js';
 import { guildSides } from '../bot/insights.js';
+import { IslandCache } from './islands.js';
+import { mapSides } from './mapData.js';
 import { unitName } from '../bot/warPoster.js';
 import { UNIT_EN } from '../planner.js';
 import { classifyError, logError } from '../bot/errors.js';
@@ -42,12 +44,25 @@ export interface BotGuilds {
   member?(guildId: string, userId: string): Promise<Presence>;
   diag?(): string;
 }
-export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; now?: () => number }
+export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; now?: () => number }
 
 type AuthFail = 'none' | 'bad' | 'expired' | 'guild';
 const AUTH_KEY = { none: 'web.err.login', bad: 'web.err.badLink', expired: 'web.err.auth', guild: 'web.err.botGone' } as const;
 
-const STATIC: Record<string, string> = { '/app.js': 'application/javascript; charset=utf-8', '/app.css': 'text/css; charset=utf-8', '/app.js.map': 'application/json' };
+/** Static bundle files, read once per build (mtime) and kept gzipped in memory (a few tens of KB). */
+const staticCache = new Map<string, { mtime: number; raw: Buffer; gz: Buffer; etag: string }>();
+function staticFile(f: string) {
+  if (!existsSync(f)) return null;
+  const mtime = statSync(f).mtimeMs;
+  let c = staticCache.get(f);
+  if (!c || c.mtime !== mtime) {
+    const raw = readFileSync(f);
+    c = { mtime, raw, gz: gzipSync(raw, { level: 9 }), etag: `"s${createHash('sha1').update(raw).digest('base64url').slice(0, 16)}"` };
+    staticCache.set(f, c);
+    if (staticCache.size > 50) staticCache.delete(staticCache.keys().next().value!);
+  }
+  return c;
+}
 const FRAME_ANCESTORS = "'self' https://discord.com https://*.discord.com https://*.discordsays.com";
 
 export function findStaticDir(): string | null {
@@ -101,10 +116,23 @@ export function createWebApp(deps: WebDeps) {
   const { ctx, guilds, secret } = deps;
   const now = deps.now ?? Date.now;
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const hub = deps.hub ?? new LiveHub(ctx, async (g, w) => guildSides(ctx, g, await ctx.worlds.ensure(w)).ours);
+  // eslint-disable-next-line prefer-const
+  let hub: LiveHub;
+  /** Own + allies + enemies for the map and the live in/out split (see mapSides for the fallbacks). */
+  const sidesOf = (g: string, snap: Awaited<ReturnType<typeof ctx.worlds.ensure>>) => {
+    const explicit = ctx.store.getWarSides(g, snap.world);
+    const live = hub?.liveSides(g) ?? { own: [], attackers: [] };
+    return mapSides(snap, {
+      explicitOurs: explicit.ours, explicitEnemies: explicit.enemies, now: Math.floor(now() / 1000),
+      linkedPlayers: ctx.store.linksForGuild(g).filter((l) => l.world === snap.world).map((l) => l.playerId),
+      roleAlliances: [...ctx.store.getAllianceRoles(g).keys()], liveOwn: live.own, liveAttackers: live.attackers,
+    });
+  };
+  hub = deps.hub ?? new LiveHub(ctx, async (g, w) => { const sd = sidesOf(g, await ctx.worlds.ensure(w)); return [...sd.ours, ...sd.allies]; });
+  const islands = deps.islands ?? new IslandCache(fetchImpl, now);
   const staticDir = deps.staticDir === undefined ? findStaticDir() : deps.staticDir;
   const limiter = new IpLimiter(20, now);
-  const mapCache = new Map<string, { key: unknown; at: number; body: Buffer; gz: Buffer }>();
+  const mapCache = new Map<string, { key: unknown; at: number; body: Buffer; gz: Buffer; etag: string; sides: string }>();
   const oauthReady = () => !!(config.activityClientId && config.activityClientSecret);
   const langOf = (g: string | null): Lang => (g ? ctx.store.getGuild(g, config.defaultLang).lang : config.defaultLang);
   const redirectUri = () => `${config.publicUrl}/oauth/callback`;
@@ -170,18 +198,34 @@ export function createWebApp(deps: WebDeps) {
     const snap = await ctx.worlds.ensure(world);
     const key = `${s.g}|${world}`;
     let c = mapCache.get(key);
-    if (!c || c.key !== snap || now() - c.at > 5 * 60_000) {
-      const sides = guildSides(ctx, s.g, snap);
+    const sides = sidesOf(s.g, snap);
+    const sk = JSON.stringify(sides);
+    if (!c || c.key !== snap || c.sides !== sk || now() - c.at > 5 * 60_000) {
       const top = [...snap.alliances.values()].sort((a, b) => b.points - a.points).slice(0, 12).map((a) => a.id);
-      const ids = [...new Set([...sides.ours, ...sides.enemies, ...top])];
+      const ids = [...new Set([...sides.ours, ...sides.allies, ...sides.enemies, ...top])];
       const body = Buffer.from(JSON.stringify(buildMapPayload(snap, sides, { now: now(), history: ctx.store.allianceTownsHistory(world, ids) })));
-      c = { key: snap, at: now(), body, gz: gzipSync(body) };
+      c = { key: snap, at: now(), body, gz: gzipSync(body, { level: 9 }), etag: `"m${createHash('sha1').update(body).digest('base64url').slice(0, 16)}"`, sides: sk };
       mapCache.set(key, c);
       if (mapCache.size > 200) mapCache.delete(mapCache.keys().next().value!);
     }
     // `me` is per user: sent by /api/me instead so the cached body stays shared per guild.
-    if (/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) send(res, 200, c.gz, 'application/json; charset=utf-8', { 'Content-Encoding': 'gzip', 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' });
-    else send(res, 200, c.body, 'application/json; charset=utf-8', { 'Cache-Control': 'no-store' });
+    // ETag + revalidation: an unchanged map costs a 304 (no body); it changes with the world data or the sides.
+    const cacheHdr = { 'Cache-Control': 'private, no-cache', ETag: c.etag, Vary: 'Accept-Encoding, Authorization, Cookie' };
+    if (req.headers['if-none-match'] === c.etag) { res.writeHead(304, cacheHdr); return void res.end(); }
+    if (/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) send(res, 200, c.gz, 'application/json; charset=utf-8', { 'Content-Encoding': 'gzip', ...cacheHdr });
+    else send(res, 200, c.body, 'application/json; charset=utf-8', cacheHdr);
+  }
+
+  /** Binary island layer (see islands.ts); static for a day, so the browser may keep it for an hour and then revalidate. */
+  async function islandsPayload(s: WebSession, req: http.IncomingMessage, res: Res) {
+    const world = ctx.store.getGuild(s.g).world;
+    if (!world) return json(res, 409, { error: t(langOf(s.g), 'web.err.notSetup') });
+    const b = await islands.get(await ctx.worlds.ensure(world));
+    if (!b) return json(res, 503, { error: 'islands unavailable' });
+    const hdr = { 'Cache-Control': 'private, max-age=3600', ETag: b.etag, Vary: 'Accept-Encoding, Authorization, Cookie' };
+    if (req.headers['if-none-match'] === b.etag) { res.writeHead(304, hdr); return void res.end(); }
+    if (/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) send(res, 200, b.gz, 'application/octet-stream', { 'Content-Encoding': 'gzip', ...hdr });
+    else send(res, 200, b.raw, 'application/octet-stream', hdr);
   }
 
   async function route(req: http.IncomingMessage, res: Res) {
@@ -199,9 +243,18 @@ export function createWebApp(deps: WebDeps) {
       const cfg = { clientId: config.activityClientId, oauth: oauthReady() && !!config.publicUrl, lang: lang0 };
       return send(res, 200, `window.__GC=${JSON.stringify(cfg).replace(/</g, '\\u003c')};`, 'application/javascript; charset=utf-8', { 'Cache-Control': 'no-store' });
     }
-    if (req.method === 'GET' && STATIC[p] && staticDir) {
-      const f = path.join(staticDir, p.slice(1));
-      if (existsSync(f)) return send(res, 200, readFileSync(f), STATIC[p], { 'Cache-Control': 'public, max-age=300' });
+    const sm = req.method === 'GET' && staticDir ? /^\/((?:app|chunk-[\w-]+)\.(js|css|js\.map))$/.exec(p) : null;
+    if (sm) {
+      const f = staticFile(path.join(staticDir!, sm[1]));
+      if (f) {
+        // Versioned (?v=) or content-hashed chunk names never change: cache for a year. Pre-gzipped in memory.
+        const immutable = url.searchParams.has('v') || sm[1].startsWith('chunk-');
+        const hdr: Record<string, string> = { 'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'public, max-age=300', ETag: f.etag, Vary: 'Accept-Encoding' };
+        if (req.headers['if-none-match'] === f.etag) { res.writeHead(304, hdr); return void res.end(); }
+        const type = sm[2] === 'css' ? 'text/css; charset=utf-8' : sm[2] === 'js' ? 'application/javascript; charset=utf-8' : 'application/json';
+        if (/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) return send(res, 200, f.gz, type, { ...hdr, 'Content-Encoding': 'gzip' });
+        return send(res, 200, f.raw, type, hdr);
+      }
     }
     if (p === '/healthz') return send(res, 200, 'ok', 'text/plain');
     if (p === '/terms') return html(res, 200, termsPage(config.privacyContact));
@@ -299,6 +352,7 @@ export function createWebApp(deps: WebDeps) {
       }
       if (p === '/api/live') return json(res, 200, await hub.view(s.g, lang), req);
       if (p === '/api/map') return mapPayload(s, req, res);
+      if (p === '/api/islands') return islandsPayload(s, req, res);
       return json(res, 404, { error: 'not found' });
     }
     return html(res, 404, messagePage(lang0, '404'));

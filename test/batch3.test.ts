@@ -8,6 +8,8 @@ import { config } from '../src/config.js';
 import { issueSession, sign, verify, webSecret, bearer } from '../src/web/auth.js';
 import { activeCommands, Budget, LiveHub, normUnits } from '../src/web/live.js';
 import { buildMapPayload } from '../src/web/mapData.js';
+import { IslandCache } from '../src/web/islands.js';
+import { gzipSync } from 'node:zlib';
 import { createWebApp, dashboardLink, type BotGuilds } from '../src/web/server.js';
 import { esc, messagePage } from '../src/web/pages.js';
 import { checkActivityApp, readActivityInfo, setActivityState } from '../src/web/activityCheck.js';
@@ -189,7 +191,7 @@ describe('map payload and timeline', () => {
     expect(p.towns).toHaveLength(4);
     expect(p.towns.find((x) => x[0] === 600)?.[4]).toBe(0);
     expect(p.conquests.map((c) => c[0])).toEqual([NOW - 10 * D, NOW - 3 * D]);
-    expect(p.sides).toEqual({ ours: [10], enemies: [20] });
+    expect(p.sides).toEqual({ ours: [10], allies: [], enemies: [20], source: 'set' });
   });
   it('replays owners backwards from today', () => {
     const hist = [{ time: NOW - 10 * D, newP: 2, oldP: 0, newA: 20, oldA: 0 }, { time: NOW - 3 * D, newP: 1, oldP: 2, newA: 10, oldA: 20 }];
@@ -266,6 +268,38 @@ describe('web server', () => {
       expect((await post({ code: 'good', guild_id: '99999999' })).status).toBe(403); // not a member
       expect((await post({ code: 'good' })).status).toBe(400); // DM
     } finally { s.close(); [config.activityClientId, config.activityClientSecret] = old; }
+  });
+});
+
+describe('web server: caching and live status', () => {
+  it('map revalidates with ETag (304), islands are served gzipped, live is never cached and carries a status', async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const secret = 'z'.repeat(32);
+    const islandsTxt = '1,450,530,1,20,1,2\n2,455,535,15,10,1,2';
+    const islands = new IslandCache((async () => new Response(gzipSync(Buffer.from(islandsTxt)))) as unknown as typeof fetch);
+    const app = createWebApp({ ctx: c, guilds: { has: (g) => g === 'g1', name: () => 'Red', check: async () => 'yes' }, secret, staticDir: null, fetchImpl: fetch, islands,
+      hub: new LiveHub(c, async () => [10], { pollSeconds: 20, rpm: 5, now: Date.now }) });
+    const srv = http.createServer(app.handler);
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    try {
+      const auth = { Authorization: `Bearer ${issueSession(secret, { u: 'u1', g: 'g1', n: 'Al' })}` };
+      const m1 = await fetch(`${base}/api/map`, { headers: auth });
+      const etag = m1.headers.get('etag');
+      expect(etag).toBeTruthy();
+      expect(m1.headers.get('cache-control')).toContain('no-cache');
+      const m2 = await fetch(`${base}/api/map`, { headers: { ...auth, 'If-None-Match': etag! } });
+      expect(m2.status).toBe(304);
+      const isl = await fetch(`${base}/api/islands`, { headers: auth });
+      expect(isl.status).toBe(200);
+      const buf = new Uint8Array(await isl.arrayBuffer());
+      expect(String.fromCharCode(...buf.slice(0, 4))).toBe('GCI2');
+      const live = await fetch(`${base}/api/live`, { headers: auth });
+      expect(live.headers.get('cache-control')).toContain('no-store');
+      const lv = await live.json() as { status?: { state: string; intervalSec: number } };
+      expect(lv.status?.state).toBeTruthy();
+      expect(lv.status?.intervalSec).toBeGreaterThan(0);
+    } finally { app.hub.stop(); srv.close(); }
   });
 });
 

@@ -3,7 +3,7 @@
 This guide sets up `/live` and `/map` (Greek: `/ζωντανά`, `/χάρτης`):
 
 * **Live window**: GrepoData shared commands (command share / "ops") for your world, with incoming attacks first and a live countdown. It also shows the latest intel and recent conquests of your index.
-* **World map**: every town coloured by owner (our side vs enemies, or by alliance). A **time slider replays conquests** from the official conquers file. It also has a towns-per-alliance chart from the bot's stored daily history, and can draw the live commands on the map.
+* **World map**: sea grid with ocean numbers, the real islands, and every town coloured by owner: our alliance blue, allies/pacts cyan, enemies red, others neutral (or by alliance). Sides come from verified members' alliance, else `/roles alliance`, else `/war ally` (split into us and pacts using who uploads own commands), else the live share; enemies from `/war enemy`, else whoever took our towns in the last 30 days, else the live attackers. The legend says which source was used. A **time slider replays conquests** from the official conquers file. It also has a towns-per-alliance chart from the bot's stored daily history, and can draw the live commands on the map.
 
 It works in two ways. Both serve the same pages from the bot container.
 
@@ -21,7 +21,7 @@ Browser ────────────────────────
                                    cloudflared ────┘──► http://bot:8080 (web app inside the bot container)
 ```
 
-The bot calls GrepoData **once per server** and caches the result. Every viewer then reads that cache. With nobody watching, it makes **no** GrepoData calls (polling stops 90 s after the last viewer). While someone watches, it makes about 3–4 requests per minute per command-share team. That is capped by `LIVE_RPM` (default 12), inside the global `GREPODATA_RPM=30`.
+The bot calls GrepoData **once per server** and caches the result. Every viewer then reads that cache. With nobody watching, it makes **no** GrepoData calls (polling stops 90 s after the last viewer). While someone watches, it polls every `LIVE_POLL_SECONDS` (default 5 s), stretched so the total stays under `LIVE_RPM` (default 12/min) with one request/min spare: 1 team → every 6 s (≈10/min), 2 teams → every 11 s. Errors double the interval (max 120 s) and a GrepoData 429 waits at least 60 s. All of this is inside the global `GREPODATA_RPM=30`. The logs show one line when the count or an error changes: `live: guild <id> <world>: N active command(s) in T team(s) (+d); next poll in Ns`.
 
 ---
 
@@ -147,7 +147,7 @@ Then press **Verify App**. Discord changes the checklist from time to time. If i
 | `ACTIVITY_CLIENT_ID` | – | Application ID of the **separate** Activity app |
 | `ACTIVITY_CLIENT_SECRET` | – | Its OAuth2 client secret (Activity login + dashboard "Sign in with Discord") |
 | `ACTIVITY_LINK` | `https://discord.com/activities/<ACTIVITY_CLIENT_ID>` | Optional Custom Link |
-| `LIVE_POLL_SECONDS` | `20` | Command-share poll interval while someone watches (min 10) |
+| `LIVE_POLL_SECONDS` | `5` | Command-share poll interval while someone watches (min 3; stretched to fit `LIVE_RPM`) |
 | `LIVE_RPM` | `12` | Max GrepoData requests/min for the live window |
 | `PRIVACY_CONTACT` | – | Contact shown on `/terms` and `/privacy` |
 | `CLOUDFLARE_TUNNEL_TOKEN` | – | Token of the named tunnel (used by the `cloudflared` compose service) |

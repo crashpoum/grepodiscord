@@ -13,12 +13,33 @@ import { config } from '../config.js';
 import { log } from '../log.js';
 
 export type { LiveEnd, LiveCommand, LiveIntel, LiveTeam, LiveView } from './types.js';
-import type { LiveCommand, LiveEnd, LiveIntel, LiveTeam, LiveView } from './types.js';
+import type { LiveCommand, LiveEnd, LiveIntel, LiveProblem, LiveTeam, LiveView } from './types.js';
 
 interface GuildLive {
   world: string | null; viewerAt: number; timer: NodeJS.Timeout | null; busy: boolean; polls: number;
   teams: LiveTeam[]; teamsAt: number; cmds: Map<string, Map<string, GdSharedCommand>>; since: Map<string, number>;
   overview: Map<string, { at: number; data: GdIndexOverview }>; updatedAt: number | null; err: { key: StringKey; vars: Record<string, string | number> } | null;
+  failures: number; lastPollAt: number | null; nextPollAt: number | null; intervalSec: number; lastCount: number | null; lastLog: string;
+}
+
+/** Which kind of problem an error key is, for the client banner. */
+export function problemOf(key: StringKey | null | undefined): LiveProblem | null {
+  if (!key) return null;
+  if (key === 'web.err.noTeams') return 'noTeams';
+  if (key === 'web.err.busy' || key === 'gd.rateLimited') return 'busy';
+  if (key === 'web.err.notSetup') return 'notSetup';
+  if (key === 'intel.refreshFailed') return 'refresh';
+  if (key === 'intel.noToken' || key === 'intel.expired' || key === 'intel.rejected' || key === 'gd.auth') return 'token';
+  return 'other';
+}
+/**
+ * Seconds between polls: LIVE_POLL_SECONDS, stretched so `teams` command pulls per minute leave one request/min spare
+ * for the team list and overview inside LIVE_RPM; doubled per consecutive failure (rate limit: at least 60 s), max 120 s.
+ */
+export function pollInterval(pollSeconds: number, rpm: number, teams: number, failures: number, rateLimited = false): number {
+  const base = Math.max(pollSeconds, Math.ceil((60 * Math.max(1, teams)) / Math.max(1, rpm - 1)));
+  if (!failures) return base;
+  return Math.min(120, Math.max(rateLimited ? 60 : 0, base * 2 ** Math.min(failures, 5)));
 }
 
 const TEAMS_EVERY = 5 * 60_000;
@@ -101,11 +122,29 @@ export class LiveHub {
       for (const x of o.latest_intel ?? []) intel.push({ townId: num(x.town_id), town: str(x.town_name), player: str(x.player_name), alliance: str(x.alliance_name), date: str(x.date), units: normUnits(x.units) });
       for (const x of o.recent_conquests ?? []) conquests.push({ townId: num(x.town_id), town: str(x.town_name), player: str(x.player_name), alliance: str(x.alliance_name), by: str(x.belligerent_alliance_name ?? x.belligerent_player_name), date: str(x.last_attack_date) });
     }
+    const problem = problemOf(s.err?.key);
     return {
-      world, updatedAt: s.updatedAt, pollSeconds: this.opts.pollSeconds, teams: s.teams,
+      status: {
+        state: problem === 'busy' ? 'throttled' : s.err ? 'error' : s.updatedAt === null ? 'warming' : 'ok',
+        problem, lastPollAt: s.lastPollAt, lastOkAt: s.updatedAt, nextPollAt: s.nextPollAt, intervalSec: s.intervalSec || this.opts.pollSeconds, serverNow: this.opts.now(),
+      },
+      world, updatedAt: s.updatedAt, pollSeconds: s.intervalSec || this.opts.pollSeconds, teams: s.teams,
       commands: activeCommands(all, ours, Math.floor(this.opts.now() / 1000)), intel: intel.slice(0, 25), conquests: conquests.slice(0, 12), stats,
       error: s.err ? t(lang, s.err.key, s.err.vars) : null, warming: s.updatedAt === null && !s.err,
     };
+  }
+
+  /** Alliances seen in the cached command share: who uploads its own commands (us) and who sends attacks at us. */
+  liveSides(guildId: string): { own: number[]; attackers: number[] } {
+    const s = this.g.get(guildId);
+    const own = new Map<number, number>(), att = new Map<number, number>();
+    for (const m of s?.cmds.values() ?? []) for (const c of m.values()) {
+      const sa = num(c.src_all_id), ta = num(c.trg_all_id);
+      if (c.own_command && sa) own.set(sa, (own.get(sa) ?? 0) + 1);
+      else if (!c.own_command && sa && ta && /attack|takeover|conquer|revolt/i.test(str(c.type))) att.set(sa, (att.get(sa) ?? 0) + 1);
+    }
+    const top = (m: Map<number, number>) => [...m].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+    return { own: top(own), attackers: top(att) };
   }
 
   stop() { for (const s of this.g.values()) { if (s.timer) clearTimeout(s.timer); s.timer = null; } }
@@ -113,7 +152,8 @@ export class LiveHub {
   private state(guildId: string): GuildLive {
     let s = this.g.get(guildId);
     if (!s) {
-      s = { world: null, viewerAt: 0, timer: null, busy: false, polls: 0, teams: [], teamsAt: 0, cmds: new Map(), since: new Map(), overview: new Map(), updatedAt: null, err: null };
+      s = { world: null, viewerAt: 0, timer: null, busy: false, polls: 0, teams: [], teamsAt: 0, cmds: new Map(), since: new Map(), overview: new Map(), updatedAt: null, err: null,
+        failures: 0, lastPollAt: null, nextPollAt: null, intervalSec: 0, lastCount: null, lastLog: '' };
       this.g.set(guildId, s);
     }
     return s;
@@ -122,6 +162,7 @@ export class LiveHub {
   private schedule(guildId: string, ms: number) {
     const s = this.state(guildId);
     if (s.timer) clearTimeout(s.timer);
+    s.nextPollAt = this.opts.now() + ms;
     s.timer = setTimeout(() => { s.timer = null; void this.tick(guildId); }, ms);
     s.timer.unref?.();
   }
@@ -132,16 +173,35 @@ export class LiveHub {
     if (s.busy) return;
     if (this.opts.now() - s.viewerAt > IDLE_AFTER) { log.debug(`live: guild ${guildId} idle, polling paused`); return; }
     s.busy = true;
+    s.lastPollAt = this.opts.now();
     try {
       await this.poll(guildId, s);
     } catch (e) {
       const c = classifyError(e);
-      logError(`live poll ${guildId}`, e, c);
+      if (problemOf(c.key) !== 'token') logError(`live poll ${guildId}`, e, c);
       s.err = { key: c.key, vars: c.vars };
     } finally {
       s.busy = false;
-      if (this.opts.now() - s.viewerAt <= IDLE_AFTER) this.schedule(guildId, this.opts.pollSeconds * 1000);
+      const p = problemOf(s.err?.key);
+      // A full budget is not a failure (just wait); token/team problems and errors back off.
+      s.failures = s.err && p !== 'busy' ? s.failures + 1 : 0;
+      s.intervalSec = pollInterval(this.opts.pollSeconds, this.opts.rpm, s.teams.length, s.failures, s.err?.key === 'gd.rateLimited');
+      this.logResult(guildId, s);
+      if (this.opts.now() - s.viewerAt <= IDLE_AFTER) this.schedule(guildId, s.intervalSec * 1000);
+      else s.nextPollAt = null;
     }
+  }
+
+  /** One log line when the result changes (count, teams or error), not on every 5 s poll. */
+  private logResult(guildId: string, s: GuildLive) {
+    let count = 0;
+    for (const m of s.cmds.values()) count += m.size;
+    const line = s.err ? `error ${s.err.key}` : `${count} active command(s) in ${s.teams.length} team(s)`;
+    if (line === s.lastLog) { log.debug(`live: guild ${guildId} ${s.world ?? '-'}: ${line}`); return; }
+    s.lastLog = line;
+    const delta = !s.err && s.lastCount !== null && s.lastCount !== count ? ` (${count > s.lastCount ? '+' : ''}${count - s.lastCount})` : '';
+    if (!s.err) s.lastCount = count;
+    (s.err ? log.warn : log.info)(`live: guild ${guildId} ${s.world ?? '-'}: ${line}${delta}; next poll in ${s.intervalSec}s`);
   }
 
   private async poll(guildId: string, s: GuildLive) {

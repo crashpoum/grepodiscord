@@ -121,3 +121,20 @@ describe('misc', () => {
     expect(md('*Mariw*')).toBe('\\*Mariw\\*');
   });
 });
+
+describe('official file freshness guard', () => {
+  it('detects older Last-Modified (multi-backend flapping)', async () => {
+    const { isOlder, fetchWorldFiles, MemoryFileStore } = await import('../src/data/official.js');
+    expect(isOlder('Tue, 24 Nov 2026 12:20:02 GMT', 'Tue, 24 Nov 2026 12:40:03 GMT')).toBe(true);
+    expect(isOlder('Tue, 24 Nov 2026 12:40:03 GMT', 'Tue, 24 Nov 2026 12:20:02 GMT')).toBe(false);
+    expect(isOlder(null, 'x')).toBe(false);
+    const { gzipSync } = await import('node:zlib');
+    const store = new MemoryFileStore();
+    const mk = (lm: string, body: string) => (async () => new Response(gzipSync(body), { status: 200, headers: { 'last-modified': lm } })) as unknown as typeof fetch;
+    const r1 = await fetchWorldFiles('en999', store, mk('Tue, 24 Nov 2026 12:40:03 GMT', 'new'));
+    expect(r1.current.players).toBe('new');
+    const r2 = await fetchWorldFiles('en999', store, mk('Tue, 24 Nov 2026 12:20:02 GMT', 'old'));
+    expect(r2.changed.size).toBe(0);
+    expect(r2.current.players).toBe('new');
+  });
+});

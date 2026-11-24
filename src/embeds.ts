@@ -12,7 +12,7 @@ export const COLORS = { conquest: 0xc0392b, alliance: 0x2980b9, bp: 0xe67e22, pl
 const MAX_DESC = 3900;
 
 /** Escape Discord markdown in user-controlled names (player/town/alliance names). */
-export const md = (s: string) => s.replace(/([\\*_~`|>#\[\]()-])/g, '\\$1');
+export const md = (s: string) => s.replace(/([\\*_~`|>\[\]()])/g, '\\$1');
 
 export const allianceName = (snap: WorldSnapshot, id: number | null, lang: Lang) =>
   id === null ? `_${t(lang, 'common.none')}_` : md(snap.alliances.get(id)?.name ?? `#${id}`);

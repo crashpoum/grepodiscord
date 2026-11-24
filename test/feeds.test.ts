@@ -89,6 +89,15 @@ describe('computeEvents', () => {
     expect(posts[2].embeds[0].description).toContain('+7.000');
   });
 
+  it('detects late-published conquests (older timestamp) via set difference', () => {
+    const st = new MemState();
+    computeEvents('en999', new Set(['conquers']), {}, s, st, 1000);
+    const late = files({ conquers: files().conquers + '\n401,1500,1,,10,,300' }); // time 1500 < baseline 3000
+    const ev = computeEvents('en999', new Set(['conquers']), { conquers: files().conquers }, buildSnapshot('en999', late), st, 2000);
+    expect(ev.conquests.map((c) => c.townId)).toEqual([401]);
+    expect(st.getLastConquestTime('en999')).toBe(3000);
+  });
+
   it('caps conquest embeds per refresh and batches by 10', () => {
     const many = Array.from({ length: 45 }, (_, k) => `${100 + (k % 2)},${5000 + k},1,3,10,20,600`).join('\n');
     const sn = buildSnapshot('en999', files({ conquers: many }));

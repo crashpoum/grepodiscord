@@ -1,7 +1,7 @@
 /** Keeps world snapshots fresh and produces feed events after each data refresh. */
 import { fetchWorldFiles, type FileStore } from './data/official.js';
 import { buildSnapshot, WORLD_FILE_NAMES, type WorldFiles, type WorldSnapshot } from './data/snapshot.js';
-import { parseKills, parsePlayers, killsMap } from './data/parse.js';
+import { parseConquers, parseKills, parsePlayers, killsMap } from './data/parse.js';
 import { allianceChanges, bpDeltas, maxConquestTime, newConquests, updateActivity, type Activity, type AllianceChange, type BpDelta } from './diff.js';
 import type { Conquest } from './data/parse.js';
 import { log } from './log.js';
@@ -12,6 +12,8 @@ export interface StateStore extends FileStore {
   getActivity(world: string): Map<number, Activity>;
   replaceActivity(world: string, a: Map<number, Activity>): void;
 }
+
+const conquestKey = (c: Conquest) => `${c.townId}:${c.time}:${c.newPlayerId ?? 0}`;
 
 export interface RefreshEvents {
   world: string;
@@ -80,7 +82,13 @@ export function computeEvents(world: string, changed: Set<string>, previous: Par
   const maxT = maxConquestTime(snapshot.conquers);
   const last = store.getLastConquestTime(world);
   if (last === null) { firstLoad = true; store.setLastConquestTime(world, maxT); }
-  else if (maxT > last) { conquests = newConquests(snapshot.conquers, last); store.setLastConquestTime(world, maxT); }
+  else if (changed.has('conquers') && previous.conquers !== undefined) {
+    // Set difference against the previous file version: catches conquests that are published late with a
+    // timestamp older than the newest one we already saw.
+    const seen = new Set(parseConquers(previous.conquers).map(conquestKey));
+    conquests = snapshot.conquers.filter((c) => !seen.has(conquestKey(c))).sort((a, b) => a.time - b.time || a.townId - b.townId);
+    store.setLastConquestTime(world, Math.max(last, maxT));
+  } else if (maxT > last) { conquests = newConquests(snapshot.conquers, last); store.setLastConquestTime(world, maxT); }
 
   // Alliance membership changes (only when players file changed and we have a previous version).
   let ac: AllianceChange[] = [];

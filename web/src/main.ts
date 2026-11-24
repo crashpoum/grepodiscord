@@ -95,7 +95,7 @@ function switchTab(t: 'live' | 'map') {
 function fail(e: unknown) {
   if (e instanceof AuthError) {
     try { sessionStorage.removeItem(SKEY); } catch { /* */ }
-    return loginScreen(e.reason === 'none' ? L('needLogin') : e.message);
+    return loginScreen(e.reason === 'none' ? L(cfg.oauth ? 'needLogin' : 'needLink') : e.message);
   }
   const v = document.getElementById('view');
   const html = `<div class="err">${esc(L('error', { msg: e instanceof Error ? e.message : String(e) }))} <button class="btn small" id="retry">${esc(L('retry'))}</button></div>`;
@@ -174,7 +174,7 @@ async function startMap() {
 async function boot() {
   try {
     if (inActivity) {
-      if (!cfg.clientId) return loginScreen(L('needLogin'));
+      if (!cfg.clientId) return loginScreen(L('needLink'));
       await activityAuth();
     } else {
       browserAuth(); // no token here is fine: the session cookie is checked by /api/me

@@ -8,7 +8,8 @@ import { config } from '../src/config.js';
 import { issueSession, sign, verify, webSecret, bearer } from '../src/web/auth.js';
 import { activeCommands, Budget, LiveHub, normUnits } from '../src/web/live.js';
 import { buildMapPayload } from '../src/web/mapData.js';
-import { createWebApp, dashboardLink } from '../src/web/server.js';
+import { createWebApp, dashboardLink, type BotGuilds } from '../src/web/server.js';
+import { esc, messagePage } from '../src/web/pages.js';
 import { activityUrl, handleLiveMap, handleWebButton, launchPlan, OPEN_PREFIX } from '../src/bot/webHandlers.js';
 import { ownerAtTime, townXY, allianceColor } from '../web/src/geo.js';
 import { WEB_STRINGS, wt } from '../src/web/strings.js';
@@ -205,7 +206,7 @@ describe('map payload and timeline', () => {
 describe('web server', () => {
   async function serve(c: Ctx, fetchImpl: typeof fetch, guilds = ['g1']) {
     const secret = 'z'.repeat(32);
-    const app = createWebApp({ ctx: c, guilds: { has: (g) => guilds.includes(g), name: (g) => (g === 'g1' ? 'Red server' : null) }, secret, staticDir: null, fetchImpl,
+    const app = createWebApp({ ctx: c, guilds: { has: (g) => guilds.includes(g), name: (g) => (g === 'g1' ? 'Red server' : null), check: async (g) => (guilds.includes(g) ? 'yes' : 'no') }, secret, staticDir: null, fetchImpl,
       hub: new LiveHub(c, async () => [10], { pollSeconds: 20, rpm: 5, now: Date.now }) });
     const srv = http.createServer(app.handler);
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
@@ -269,8 +270,8 @@ describe('web server', () => {
 
 describe('fixes: personal link behind the tunnel, public share', () => {
   const SECRET = 'q'.repeat(32);
-  async function stack(c: Ctx) {
-    const app = createWebApp({ ctx: c, guilds: { has: (g) => g === 'g1', name: () => 'Red' }, secret: SECRET, staticDir: null, fetchImpl: fetch,
+  async function stack(c: Ctx, guilds: BotGuilds = { has: (g) => g === 'g1', name: () => 'Red', check: async (g) => (g === 'g1' ? 'yes' : 'no') }, secret = SECRET) {
+    const app = createWebApp({ ctx: c, guilds, secret, staticDir: null, fetchImpl: fetch,
       hub: new LiveHub(c, async () => [], { pollSeconds: 20, rpm: 5, now: Date.now }) });
     const bot = http.createServer(app.handler);
     await new Promise<void>((r) => bot.listen(0, '127.0.0.1', () => r()));
@@ -303,7 +304,7 @@ describe('fixes: personal link behind the tunnel, public share', () => {
       // no cookie at all -> "please open it from Discord" (reason none), not "expired"
       const none = await fetch(`${st.base}/api/me`);
       expect(none.status).toBe(401);
-      expect(await none.json()).toMatchObject({ reason: 'none', error: STRINGS.en['web.err.login'] });
+      expect(await none.json()).toMatchObject({ reason: 'none', error: STRINGS.en['web.freshLink'] });
     } finally { st.close(); config.publicUrl = old; }
   });
 
@@ -321,6 +322,67 @@ describe('fixes: personal link behind the tunnel, public share', () => {
       const foreign = issueSession(SECRET, { u: 'u1', g: 'g9' });
       expect(await (await fetch(`${st.base}/api/me`, { headers: { Authorization: `Bearer ${foreign}` } })).json()).toMatchObject({ reason: 'guild' });
     } finally { st.close(); }
+  });
+
+  it('trusts the signed link when the guild is missing from the gateway cache (the reported "not a member" bug)', async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const g = '1173401431538151496';
+    c.store.setGuild({ guildId: g, world: 'gr999', lang: 'el', verifiedRoleId: null });
+    const asked: string[] = [];
+    // cache empty (reconnecting / not ready), REST says yes or cannot tell -> logged in; member lookup may fail softly
+    for (const check of [async () => 'yes' as const, async () => 'unknown' as const, async () => { throw new Error('network'); }, undefined]) {
+      const st = await stack(c, { has: () => false, name: () => null, check, member: async (gg, u) => { asked.push(`${gg}/${u}`); throw new Error('rate limited'); } });
+      try {
+        const link = issueSession(SECRET, { u: 'u5', g });
+        const r = await fetch(`${st.base}/go/live?t=${link}`, { redirect: 'manual' });
+        expect(r.status).toBe(302);
+        const me = await fetch(`${st.base}/api/me`, { headers: { Cookie: r.headers.get('set-cookie')!.split(';')[0] } });
+        expect(me.status).toBe(200);
+        expect(await me.json()).toMatchObject({ guildId: g });
+      } finally { st.close(); }
+    }
+    expect(asked).toContain(`${g}/u5`);
+  });
+
+  it('refuses only when Discord positively says the bot left or the user left', async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const gone = await stack(c, { has: () => false, name: () => null, check: async () => 'no' });
+    try {
+      const r = await fetch(`${gone.base}/go/live?t=${issueSession(SECRET, { u: 'u1', g: 'g1' })}`, { redirect: 'manual' });
+      expect(r.status).toBe(403);
+      const body = await r.text();
+      expect(body).toContain(esc(STRINGS.el['web.err.botGone']));
+      expect(body).not.toContain(esc(STRINGS.el['web.err.notMember']));
+    } finally { gone.close(); }
+    const left = await stack(c, { has: (g) => g === 'g1', name: () => 'Red', member: async () => 'no' });
+    try {
+      const r = await fetch(`${left.base}/go/map?t=${issueSession(SECRET, { u: 'u1', g: 'g1' })}`, { redirect: 'manual' });
+      expect(r.status).toBe(403);
+      expect(await r.text()).toContain(esc(STRINGS.el['web.err.left']));
+    } finally { left.close(); }
+  });
+
+  it('without Discord login configured, pages hide "Sign in with Discord" and say to open a fresh link (EN + GR)', async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const old = { id: config.activityClientId, sec: config.activityClientSecret };
+    config.activityClientId = ''; config.activityClientSecret = '';
+    const st = await stack(c);
+    try {
+      const login = await (await fetch(`${st.base}/login`)).text();
+      expect(login).not.toContain('href="/login"');
+      expect(login).toContain(esc(STRINGS.en['web.freshLink']));
+      const bad = await (await fetch(`${st.base}/go/live?t=${issueSession('another-process-key-xxxxxxxxxxxx', { u: 'u1', g: 'g1' })}`)).text();
+      expect(bad).not.toContain('href="/login"');
+      expect(bad).not.toContain(STRINGS.en['web.loginLink']);
+      expect(bad).toContain(esc(STRINGS.en['web.freshLink']));
+      // the "bot left" page is in the guild's language (el here)
+    } finally { st.close(); config.activityClientId = old.id; config.activityClientSecret = old.sec; }
+    const gr = messagePage('el', STRINGS.el['web.err.noOAuth'], { login: false, hint: true });
+    expect(gr).toContain(esc(STRINGS.el['web.freshLink']));
+    expect(gr).not.toContain('/login"');
+    expect(messagePage('el', 'x', { login: true })).toContain('href="/login"');
+    expect(STRINGS.el['web.freshLink']).toMatch(/\/live/);
+    expect(STRINGS.el['web.freshLink']).not.toBe(STRINGS.en['web.freshLink']);
   });
 
   function fakeInteraction(commandName: string, share: boolean) {
@@ -359,6 +421,13 @@ describe('fixes: personal link behind the tunnel, public share', () => {
       const url = p.components[0].components[0].url as string;
       expect(url.startsWith('https://grepo.example.com/go/map?t=')).toBe(true);
       expect(verify(new URL(url).searchParams.get('t'), webSecret(c.store))).toMatchObject({ u: 'u7', g: 'g1' });
+      // ...and that per-click link logs the clicker in even when the gateway cache misses the guild
+      const st = await stack(c, { has: () => false, name: () => null, check: async () => 'unknown', member: async () => 'yes' }, webSecret(c.store));
+      try {
+        const r = await fetch(`${st.base}/go/map?t=${new URL(url).searchParams.get('t')}`, { redirect: 'manual' });
+        expect(r.status).toBe(302);
+        expect(r.headers.get('location')).toBe('/map');
+      } finally { st.close(); }
       // without share: private reply with the personal link
       const priv = fakeInteraction('live', false);
       await handleLiveMap(c, priv.i, 'en', 'gr999');

@@ -27,12 +27,28 @@ log.info(ai.available ? `Gemini: ${ai.model} (free tier caps: ${config.geminiRpm
 for (const w of store.trackedWorlds()) ctx.worlds.loadFromCache(w);
 seedEnvToken(store);
 
+const discordNo = (e: unknown, codes: number[]) => codes.includes(Number((e as { code?: unknown })?.code));
+
 // Guilds intent only: no privileged intents (no message content, no member list scraping).
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // Live window / map web app (Activity + dashboard), only when configured. Shares the store, caches and GrepoData budget.
 const web = config.webEnabled
-  ? startWebServer(ctx, { has: (id) => client.guilds.cache.has(id), name: (id) => client.guilds.cache.get(id)?.name ?? null })
+  ? startWebServer(ctx, {
+    has: (id) => client.guilds.cache.has(id),
+    name: (id) => client.guilds.cache.get(id)?.name ?? null,
+    // REST lookups (no privileged intent): only a definite "Unknown Guild/Member" or "Missing Access" counts as no.
+    check: async (id) => {
+      if (!client.isReady()) return 'unknown';
+      try { await client.guilds.fetch({ guild: id, force: true }); return 'yes'; } catch (e) { return discordNo(e, [10004, 50001]) ? 'no' : 'unknown'; }
+    },
+    member: async (guildId, userId) => {
+      const g = client.guilds.cache.get(guildId);
+      if (!g) return 'unknown';
+      try { await g.members.fetch({ user: userId, force: false }); return 'yes'; } catch (e) { return discordNo(e, [10007, 10013]) ? 'no' : 'unknown'; }
+    },
+    diag: () => `client ${client.isReady() ? 'ready' : 'NOT ready'}, ${client.guilds.cache.size} guild(s) cached`,
+  })
   : null;
 if (!web) log.info('web: live window disabled (set PUBLIC_URL and/or ACTIVITY_CLIENT_ID to enable)');
 

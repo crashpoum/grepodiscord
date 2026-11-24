@@ -28,11 +28,23 @@ import { buildMapPayload } from './mapData.js';
 import { authorizeUrl, bearer, check, discordGet, exchangeCode, issueSession, keyId, OAuthError, readCookie, sessionCookie, sign, verify, webSecret, type DiscordGuild, type DiscordUser, type WebSession } from './auth.js';
 import { termsPage, privacyPage, messagePage, pickerPage } from './pages.js';
 
-export interface BotGuilds { has(id: string): boolean; name(id: string): string | null }
+export type Presence = 'yes' | 'no' | 'unknown';
+/**
+ * What the web app needs from the Discord client. `has` is the (cheap) gateway cache; `check` and `member` ask Discord's
+ * REST API (no privileged intent needed) and answer 'unknown' when they cannot tell (e.g. not connected yet), in which
+ * case the signed token is trusted: the bot itself signed it for that guild and user.
+ */
+export interface BotGuilds {
+  has(id: string): boolean;
+  name(id: string): string | null;
+  check?(id: string): Promise<Presence>;
+  member?(guildId: string, userId: string): Promise<Presence>;
+  diag?(): string;
+}
 export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; now?: () => number }
 
 type AuthFail = 'none' | 'bad' | 'expired' | 'guild';
-const AUTH_KEY = { none: 'web.err.login', bad: 'web.err.badLink', expired: 'web.err.auth', guild: 'web.err.notMember' } as const;
+const AUTH_KEY = { none: 'web.err.login', bad: 'web.err.badLink', expired: 'web.err.auth', guild: 'web.err.botGone' } as const;
 
 const STATIC: Record<string, string> = { '/app.js': 'application/javascript; charset=utf-8', '/app.css': 'text/css; charset=utf-8', '/app.js.map': 'application/json' };
 const FRAME_ANCESTORS = "'self' https://discord.com https://*.discord.com https://*.discordsays.com";
@@ -95,11 +107,27 @@ export function createWebApp(deps: WebDeps) {
   const oauthReady = () => !!(config.activityClientId && config.activityClientSecret);
   const langOf = (g: string | null): Lang => (g ? ctx.store.getGuild(g, config.defaultLang).lang : config.defaultLang);
   const redirectUri = () => `${config.publicUrl}/oauth/callback`;
+  const loginOk = () => oauthReady() && !!config.publicUrl;
+  const page = (lang: Lang, msg: string, hint = true) => messagePage(lang, msg, { login: loginOk(), hint });
+
+  // Is the bot still in this guild? Gateway cache first, then Discord REST; 'unknown' trusts the signed token.
+  const presence = new Map<string, { at: number; v: Presence }>();
+  async function botIn(g: string): Promise<boolean> {
+    if (guilds.has(g)) return true;
+    const c = presence.get(g);
+    let v: Presence = c && now() - c.at < 5 * 60_000 ? c.v : 'unknown';
+    if (!c || now() - c.at >= 5 * 60_000) {
+      v = guilds.check ? await guilds.check(g).catch(() => 'unknown' as Presence) : 'unknown';
+      presence.set(g, { at: now(), v });
+      log.warn(`web: guild ${g} not in the gateway cache (${guilds.diag?.() ?? 'no diag'}); Discord REST says: ${v}`);
+    }
+    return v !== 'no';
+  }
   /** A guild the web app may serve: the bot is in it and it has a world. */
-  const usable = (g: string) => guilds.has(g) && !!ctx.store.getGuild(g).world;
+  const usable = async (g: string) => !!ctx.store.getGuild(g).world && (await botIn(g));
 
   /** Session from `Authorization: Bearer` (Activity) or the session cookie (browser), with the reason when refused. */
-  function session(req: http.IncomingMessage): { s: WebSession } | { why: AuthFail } {
+  async function session(req: http.IncomingMessage): Promise<{ s: WebSession } | { why: AuthFail }> {
     const b = bearer(req.headers.authorization);
     const tok = b ?? readCookie(req.headers.cookie);
     const r = check<WebSession>(tok, secret, now());
@@ -107,7 +135,7 @@ export function createWebApp(deps: WebDeps) {
       if (r.why !== 'none') log.warn(`web: ${b ? 'bearer' : 'cookie'} session refused (${r.why}${r.exp ? `, expired ${new Date(r.exp).toISOString()}` : ''}); this process signs with key ${keyId(secret)}`);
       return { why: r.why };
     }
-    if (!guilds.has(r.v.g)) { log.warn(`web: session for guild ${r.v.g} refused: the bot is not in that server (or not connected yet)`); return { why: 'guild' }; }
+    if (!(await botIn(r.v.g))) { log.warn(`web: session for guild ${r.v.g} refused: the bot is not in that server`); return { why: 'guild' }; }
     return { s: r.v };
   }
   const secureCookie = (req: http.IncomingMessage) => config.publicUrl.startsWith('https://') || String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https';
@@ -184,13 +212,14 @@ export function createWebApp(deps: WebDeps) {
       let u;
       try { u = await oauthUser(body.code, null); } catch (e) { log.warn(`web: activity token exchange failed: ${(e as Error).message}`); return json(res, 401, { error: t(lang, 'web.err.oauth') }); }
       if (!g) return json(res, 400, { access_token: u.token, error: t(lang, 'web.err.noGuild') });
-      if (!u.guildIds.includes(g) || !guilds.has(g)) return json(res, 403, { access_token: u.token, error: t(lang, 'web.err.notMember') });
+      if (!u.guildIds.includes(g)) return json(res, 403, { access_token: u.token, error: t(lang, 'web.err.notMember') });
+      if (!(await botIn(g))) return json(res, 403, { access_token: u.token, error: t(lang, 'web.err.botGone') });
       return json(res, 200, { access_token: u.token, session: issueSession(secret, { u: u.user.id, g, n: u.user.global_name || u.user.username, k: 'activity' }, undefined, now()) });
     }
 
     // ---- Browser dashboard login
     if (req.method === 'GET' && p === '/login') {
-      if (!oauthReady() || !config.publicUrl) return html(res, 503, messagePage(lang0, t(lang0, 'web.err.noOAuth')));
+      if (!loginOk()) return html(res, 503, page(lang0, t(lang0, 'web.err.noOAuth')));
       const next = url.searchParams.get('next') === 'map' ? 'map' : 'live';
       const state = sign({ n: next, r: randomBytes(8).toString('hex'), exp: now() + 10 * 60_000 }, secret);
       return redirect(res, authorizeUrl(state, redirectUri()));
@@ -199,12 +228,13 @@ export function createWebApp(deps: WebDeps) {
       if (!limiter.ok(ip)) return html(res, 429, messagePage(lang0, 'Too many requests'));
       const st = verify<{ n: string; exp: number }>(url.searchParams.get('state'), secret, now());
       const code = url.searchParams.get('code');
-      if (!st || !code || !oauthReady()) return html(res, 400, messagePage(lang0, t(lang0, 'web.err.oauth')));
+      if (!st || !code || !oauthReady()) return html(res, 400, page(lang0, t(lang0, 'web.err.oauth')));
       let u;
-      try { u = await oauthUser(code, redirectUri()); } catch (e) { log.warn(`web: dashboard login failed: ${(e as Error).message}`); return html(res, 401, messagePage(lang0, t(lang0, 'web.err.oauth'))); }
-      const ok = u.guildIds.filter(usable);
+      try { u = await oauthUser(code, redirectUri()); } catch (e) { log.warn(`web: dashboard login failed: ${(e as Error).message}`); return html(res, 401, page(lang0, t(lang0, 'web.err.oauth'))); }
+      const ok: string[] = [];
+      for (const g of u.guildIds) if (await usable(g)) ok.push(g);
       const name = u.user.global_name || u.user.username;
-      if (!ok.length) return html(res, 403, messagePage(lang0, t(lang0, 'web.err.notMember')));
+      if (!ok.length) return html(res, 403, page(lang0, t(lang0, 'web.err.notMember')));
       if (ok.length === 1) { const tok = issueSession(secret, { u: u.user.id, g: ok[0], n: name, k: 'oauth' }, undefined, now()); return login(req, res, tok, verify<WebSession>(tok, secret, now())!.exp, st.n); }
       const pick = sign({ u: u.user.id, gs: ok, n: st.n, nm: name, exp: now() + 10 * 60_000 }, secret);
       return html(res, 200, pickerPage(lang0, ok.map((g) => ({ id: g, name: guilds.name(g) ?? g, href: `/oauth/pick?g=${g}&t=${encodeURIComponent(pick)}` }))));
@@ -212,7 +242,7 @@ export function createWebApp(deps: WebDeps) {
     if (req.method === 'GET' && p === '/oauth/pick') {
       const pk = verify<{ u: string; gs: string[]; n: string; nm: string; exp: number }>(url.searchParams.get('t'), secret, now());
       const g = url.searchParams.get('g') ?? '';
-      if (!pk || !pk.gs.includes(g)) return html(res, 400, messagePage(lang0, t(lang0, 'web.err.auth')));
+      if (!pk || !pk.gs.includes(g)) return html(res, 400, page(lang0, t(lang0, 'web.err.auth')));
       const tok = issueSession(secret, { u: pk.u, g, n: pk.nm, k: 'oauth' }, undefined, now());
       return login(req, res, tok, verify<WebSession>(tok, secret, now())!.exp, pk.n);
     }
@@ -223,9 +253,14 @@ export function createWebApp(deps: WebDeps) {
       const r = check<WebSession>(url.searchParams.get('t'), secret, now());
       if (!r.ok) {
         log.warn(`web: personal link refused (${r.why}); this process signs with key ${keyId(secret)}`);
-        return html(res, 401, messagePage(lang0, t(lang0, AUTH_KEY[r.why])));
+        return html(res, 401, page(lang0, t(lang0, AUTH_KEY[r.why])));
       }
-      if (!guilds.has(r.v.g)) return html(res, 403, messagePage(lang0, t(langOf(r.v.g), 'web.err.notMember')));
+      // Trust the signature (the bot signed it for this guild + user at command time); only refuse when Discord
+      // positively says the bot left the server or the user is no longer a member.
+      const gl = langOf(r.v.g);
+      if (!(await botIn(r.v.g))) return html(res, 403, page(gl, t(gl, 'web.err.botGone')));
+      const m = guilds.member ? await guilds.member(r.v.g, r.v.u).catch(() => 'unknown' as Presence) : 'unknown';
+      if (m === 'no') { log.warn(`web: link for user ${r.v.u} refused: no longer a member of ${r.v.g}`); return html(res, 403, page(gl, t(gl, 'web.err.left'))); }
       return login(req, res, url.searchParams.get('t')!, r.v.exp, go[1]);
     }
     if (req.method === 'GET' && p === '/logout') {
@@ -236,8 +271,8 @@ export function createWebApp(deps: WebDeps) {
     // ---- Data API
     if (p.startsWith('/api/')) {
       if (req.method !== 'GET') return json(res, 405, { error: 'method' });
-      const sr = session(req);
-      if (!('s' in sr)) return json(res, 401, { error: t(lang0, AUTH_KEY[sr.why]), reason: sr.why });
+      const sr = await session(req);
+      if (!('s' in sr)) return json(res, 401, { error: t(lang0, sr.why === 'none' && !loginOk() ? 'web.freshLink' : AUTH_KEY[sr.why]), reason: sr.why });
       const s = sr.s;
       const lang = langOf(s.g);
       if (p === '/api/me') {

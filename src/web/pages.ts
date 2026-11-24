@@ -7,8 +7,12 @@ function shell(title: string, body: string, lang: Lang = 'en') {
   return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><link rel="stylesheet" href="/app.css"></head><body class="page"><main class="doc">${body}</main></body></html>`;
 }
 
-export function messagePage(lang: Lang, msg: string) {
-  return shell('GrepoCord', `<h1>GrepoCord</h1><p>${esc(msg)}</p><p><a href="/login">${esc(t(lang, 'web.loginLink'))}</a></p>`, lang);
+/** Message page. The "Sign in with Discord" link only appears when Discord login is configured; otherwise it says how to get a fresh link. */
+export function messagePage(lang: Lang, msg: string, opts: { login?: boolean; hint?: boolean } = {}) {
+  const tail = opts.login
+    ? `<p><a class="btn" href="/login">${esc(t(lang, 'web.loginLink'))}</a></p>`
+    : opts.hint ? `<p>${esc(t(lang, 'web.freshLink'))}</p>` : '';
+  return shell('GrepoCord', `<h1>GrepoCord</h1><p>${esc(msg)}</p>${tail}`, lang);
 }
 
 export function pickerPage(lang: Lang, guilds: { id: string; name: string; href: string }[]) {

@@ -1,0 +1,33 @@
+services:
+  bot:
+    build: .
+    image: grepodiscord:latest
+    container_name: grepodiscord
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/grepodiscord.sqlite
+    volumes:
+      - ./data:/app/data
+    # No ports exposed: the bot only makes outbound connections (Discord gateway, grepolis.com, grepodata.com).
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # One-off: register slash commands →  docker compose run --rm register
+  register:
+    image: grepodiscord:latest
+    profiles: ["tools"]
+    env_file: .env
+    command: ["node", "--disable-warning=ExperimentalWarning", "compiled/register.js"]
+
+  # One-off dry run without Discord →  docker compose run --rm cli refresh gr126
+  cli:
+    image: grepodiscord:latest
+    profiles: ["tools"]
+    env_file: .env
+    environment:
+      CLI_DB_PATH: /app/data/cli.sqlite
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["node", "--disable-warning=ExperimentalWarning", "compiled/cli.js"]

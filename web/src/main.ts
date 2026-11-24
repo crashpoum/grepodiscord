@@ -128,7 +128,7 @@ async function pollLive() {
 async function startLive() {
   const v = document.getElementById('view')!;
   v.style.overflow = 'hidden';
-  liveScreen = new LiveScreen(v, { L, esc, lang, units: me.units, user: me.user });
+  liveScreen = new LiveScreen(v, { L, esc, lang, units: me.units, user: me.user, world: me.world });
   (window as unknown as { __gcLive?: LiveScreen }).__gcLive = liveScreen;
   if (lastLive) liveScreen.setData(lastLive);
   await pollLive();

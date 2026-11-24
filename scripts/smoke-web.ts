@@ -34,7 +34,7 @@ const items = Array.from({ length: N }, (_, i) => {
   const s = inc ? them[(i * 3) % them.length] : ours[i % ours.length];
   const sp = snap.players.get(s.playerId!)!, tp = snap.players.get(tgt.playerId!)!;
   return { es_id: `c${i}`, arrival_at: now + 45 + i * 97, type: TYPES[i % TYPES.length], src_twn_id: s.id, src_twn_n: s.name, src_ply_n: sp.name, src_ply_id: sp.id, src_all_id: sp.allianceId, src_all_n: snap.alliances.get(sp.allianceId!)?.name,
-    trg_twn_id: tgt.id, trg_twn_n: tgt.name, trg_ply_n: tp.name, trg_ply_id: tp.id, trg_all_id: tp.allianceId, trg_all_n: snap.alliances.get(tp.allianceId!)?.name, units: UNITS[i % UNITS.length],
+    trg_twn_id: tgt.id, trg_twn_n: tgt.name, trg_ply_n: tp.name, trg_ply_id: tp.id, trg_all_id: tp.allianceId, trg_all_n: snap.alliances.get(tp.allianceId!)?.name, units: TYPES[i % TYPES.length] === 'support' && i % 3 === 0 ? {} : UNITS[i % UNITS.length], // some supports hide their units in the share
     upload_n: UPLOADERS[i % UPLOADERS.length], own_command: !inc, return: i % 13 === 12 };
 });
 const fakeGd = (async (u: string) => {

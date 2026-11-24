@@ -81,7 +81,7 @@ Check it:
 3. **OAuth2**:
    * **Reset Secret** → copy it. This is `ACTIVITY_CLIENT_SECRET`. Keep it secret and never commit it.
    * **Redirects** → add `https://grepo.example.com/oauth/callback` (used by "Sign in with Discord" on the browser dashboard) → **Save**.
-4. **Activities → URL Mappings**: set **PREFIX** `/` and **TARGET** `grepo.example.com`. Use no `https://` and no path. Save.
+4. **Activities → URL Mappings**: set **PREFIX** `/` and **TARGET** `grepo.example.com`. Use no `https://` and no path. Save. That one mapping is all you need: the official Grepolis icons are fetched by the bot and served from the same host (`/gpcdn/units.jpg`, `/gpcdn/cmds.png`), so no extra mapping for innogamescdn.com is required.
 5. **Activities → Settings** → **Enable Activities** and accept the prompt.
    * Discord creates the default **Entry Point command** ("Launch") for you. That is what puts the app in the App Launcher 🚀.
    * *Supported Platforms*: tick Web/Desktop, iOS and Android.
@@ -149,6 +149,7 @@ Then press **Verify App**. Discord changes the checklist from time to time. If i
 | `ACTIVITY_LINK` | `https://discord.com/activities/<ACTIVITY_CLIENT_ID>` | Optional Custom Link |
 | `LIVE_POLL_SECONDS` | `5` | Command-share poll interval while someone watches (min 3; stretched to fit `LIVE_RPM`) |
 | `LIVE_RPM` | `12` | Max GrepoData requests/min for the live window |
+| `GREPOLIS_CDN` | `https://gpnl.innogamescdn.com` | Where the bot fetches the official unit/command icons (served to clients at `/gpcdn/*`). Empty = own icons only |
 | `PRIVACY_CONTACT` | – | Contact shown on `/terms` and `/privacy` |
 | `CLOUDFLARE_TUNNEL_TOKEN` | – | Token of the named tunnel (used by the `cloudflared` compose service) |
 | `COMPOSE_PROFILES` | – | `tunnel` starts cloudflared with plain `docker compose up -d` |

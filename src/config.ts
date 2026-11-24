@@ -52,6 +52,8 @@ export const config = {
   /** Live window: seconds between command-share polls, and the share of the GrepoData budget it may use. */
   livePollSeconds: Math.max(3, num(env.LIVE_POLL_SECONDS, 5)),
   liveRpm: Math.max(2, num(env.LIVE_RPM, 12)),
+  /** Official Grepolis image CDN for unit/command icons (proxied + cached by the web server, never committed). Empty = own icons only. */
+  grepolisCdn: (env.GREPOLIS_CDN ?? 'https://gpnl.innogamescdn.com').trim().replace(/\/+$/, ''),
   privacyContact: env.PRIVACY_CONTACT ?? '',
   logLevel: env.LOG_LEVEL ?? 'info',
 };

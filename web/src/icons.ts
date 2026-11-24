@@ -21,9 +21,10 @@ const MYTH: Record<string, string> = {
   minotaur: 'Mn', manticore: 'Ma', zyklop: 'Cy', harpy: 'Ha', medusa: 'Me', centaur: 'Ce', pegasus: 'Pe', cerberus: 'Cb', fury: 'Er',
   griffin: 'Gr', calydonian_boar: 'Bo', sea_monster: 'Hy', siren: 'Si', satyr: 'Sa', spartoi: 'Sp', ladon: 'La', godsent: 'Gs',
 };
-const HEROES = ['agamemnon', 'ajax', 'alexandrios', 'andromeda', 'apheledes', 'argus', 'aristotle', 'atalanta', 'cheiron', 'christopholus', 'daidalos',
-  'democritus', 'deimos', 'eurybia', 'ferkyon', 'hector', 'helen', 'hercules', 'iason', 'leonidas', 'medea', 'melousa', 'odysseus', 'orpheus',
-  'pariphaistes', 'pelops', 'perseus', 'philoctetes', 'rekonos', 'telemachos', 'themistokles', 'urephon', 'zuretha', 'anysia', 'mihalis', 'hippolyta', 'heroes'];
+const HEROES = ['achilles', 'agamemnon', 'ajax', 'alexandrios', 'andromeda', 'anysia', 'apheledes', 'argus', 'aristotle', 'atalanta', 'cheiron', 'christopholus',
+  'daidalos', 'deimos', 'democritus', 'deryntes', 'ephialtes', 'eurybia', 'ferkyon', 'hector', 'helen', 'hercules', 'iason', 'leonidas', 'lysippe', 'medea',
+  'melousa', 'mihalis', 'odysseus', 'orpheus', 'pariphaistes', 'pelops', 'perseus', 'philoctetes', 'rekonos', 'telemachos', 'terylea', 'themistokles',
+  'theseus', 'urephon', 'vedouma', 'xanthos', 'ylestres', 'zuretha', 'hippolyta', 'heroes'];
 
 export function unitDef(id: string): UnitDef {
   const k = id.toLowerCase();
@@ -94,13 +95,56 @@ export function injectSprite(doc: Document = document) {
   doc.body.appendChild(div);
 }
 
+// ---------------------------------------------------------------- official Grepolis icons (runtime only)
+/**
+ * Cell [column, row] of each unit in the official 9×9 sprite of 40 px icons (unit_icons_40x40_<GP_UNITS_VERSION>.png on
+ * InnoGames' CDN), served by the bot at /gpcdn/units.jpg. Found by matching every cell against named copies, so these
+ * belong to that exact sprite version. Units not listed (or a failed load) use the own SVG icon above.
+ */
+export const GP_UNITS_VERSION = '66aaef2';
+export const GP_POS: Record<string, [number, number]> = {
+  achilles: [0, 0], agamemnon: [1, 0], andromeda: [2, 0], aristotle: [3, 0], centaur: [4, 0], demolition_ship: [5, 0], hercules: [6, 0], odysseus: [7, 0], sword: [8, 0],
+  ajax: [0, 1], alexandrios: [1, 1], anysia: [2, 1], atalanta: [3, 1], cerberus: [4, 1], deryntes: [5, 1], hoplite: [6, 1], orpheus: [7, 1], telemachos: [8, 1],
+  apheledes: [0, 2], archer: [1, 2], argus: [2, 2], attack_ship: [3, 2], chariot: [4, 2], ephialtes: [5, 2], iason: [6, 2], pariphaistes: [7, 2], terylea: [8, 2],
+  big_transporter: [0, 3], bireme: [1, 3], calydonian_boar: [2, 3], catapult: [3, 3], cheiron: [4, 3], eurybia: [5, 3], ladon: [6, 3], pegasus: [7, 3], themistokles: [8, 3],
+  christopholus: [0, 4], colonize_ship: [1, 4], daidalos: [2, 4], deimos: [3, 4], democritus: [4, 4], ferkyon: [5, 4], leonidas: [6, 4], pelops: [7, 4], theseus: [8, 4],
+  fury: [0, 5], godsent: [1, 5], griffin: [2, 5], harpy: [3, 5], hector: [4, 5], helen: [5, 5], lysippe: [6, 5], perseus: [7, 5], trireme: [8, 5],
+  manticore: [0, 6], medea: [1, 6], medusa: [2, 6], melousa: [3, 6], mihalis: [4, 6], militia: [5, 6], minotaur: [6, 6], philoctetes: [7, 6], unknown: [8, 6],
+  rekonos: [0, 7], rider: [1, 7], satyr: [2, 7], sea_monster: [3, 7], siren: [4, 7], slinger: [5, 7], small_transporter: [6, 7], spartoi: [7, 7], unknown_hero: [8, 7],
+  unknown_naval: [0, 8], urephon: [1, 8], vedouma: [2, 8], xanthos: [3, 8], ylestres: [4, 8], zuretha: [5, 8], zyklop: [6, 8],
+};
+/** Order of the command-type strip at /gpcdn/cmds.png (src/web/gpcdn.ts GP_CMD_FILES). */
+export const GP_CMD_ORDER: CmdKind[] = ['attack', 'support', 'revolt', 'conquest', 'return', 'spy'];
+/** Which official sprites loaded in this browser (set by loadOfficialIcons; false = own SVGs). */
+export const gp = { units: false, cmds: false };
+const UNITS_URL = `/gpcdn/units.jpg?v=${GP_UNITS_VERSION}`, CMDS_URL = `/gpcdn/cmds.png?v=${GP_UNITS_VERSION}`;
+/** Probe both sprites once (lazy, cached by the browser); resolves true if anything changed. Never throws. */
+export function loadOfficialIcons(timeoutMs = 8000): Promise<boolean> {
+  if (typeof Image === 'undefined') return Promise.resolve(false);
+  const probe = (src: string) => new Promise<boolean>((res) => {
+    const im = new Image(); const t = setTimeout(() => res(false), timeoutMs);
+    im.onload = () => { clearTimeout(t); res(im.naturalWidth > 0); }; im.onerror = () => { clearTimeout(t); res(false); };
+    im.src = src;
+  });
+  return Promise.all([probe(UNITS_URL), probe(CMDS_URL)]).then(([u, c]) => { gp.units = u; gp.cmds = c; return u || c; });
+}
+/** Official icon id for a unit id (a few aliases), or null. */
+export function gpUnit(id: string): [number, number] | null {
+  const k = id.toLowerCase();
+  return GP_POS[k] ?? GP_POS[({ cyclops: 'zyklop', hydra: 'sea_monster', erinys: 'fury', fire_ship: 'demolition_ship', light_ship: 'attack_ship' } as Record<string, string>)[k] ?? ''] ?? null;
+}
+
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 export function unitIcon(id: string, title: string, size = 20): string {
+  const pos = gp.units ? gpUnit(id) : null;
+  if (pos) return `<span class="gpu" role="img" aria-label="${esc(title)}" title="${esc(title)}" style="width:${size}px;height:${size}px;background:url(${UNITS_URL}) ${-pos[0] * size}px ${-pos[1] * size}px/${9 * size}px ${9 * size}px no-repeat"></span>`;
   const d = unitDef(id);
   const inner = d.glyph ? `<use href="#g-${d.glyph}"/>` : `<text x="12" y="16.5" text-anchor="middle" font-size="${d.code.length > 2 ? 9 : 11}" font-weight="700" fill="#fff" font-family="system-ui,sans-serif">${esc(d.code)}</text>`;
   return `<svg class="ui u-${d.cat}" width="${size}" height="${size}" viewBox="0 0 24 24" role="img" aria-label="${esc(title)}"><title>${esc(title)}</title><rect width="24" height="24" rx="4" fill="${CAT_BG[d.cat]}"/>${inner}</svg>`;
 }
 export function typeIcon(kind: CmdKind, title: string, size = 30): string {
+  const i = gp.cmds ? GP_CMD_ORDER.indexOf(kind) : -1;
+  if (i >= 0) return `<span class="gpt" role="img" aria-label="${esc(title)}" title="${esc(title)}" style="width:${size}px;height:${size}px;background:url(${CMDS_URL}) ${-i * size}px 0/${GP_CMD_ORDER.length * size}px ${size}px no-repeat"></span>`;
   return `<svg class="ti" width="${size}" height="${size}" role="img" aria-label="${esc(title)}"><title>${esc(title)}</title><use href="#t-${kind}"/></svg>`;
 }
 export const playerIcon = '<svg class="pi" width="12" height="12" aria-hidden="true"><use href="#i-player"/></svg>';

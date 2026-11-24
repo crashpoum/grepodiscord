@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { gzipSync } from 'node:zlib';
+import { createCanvas } from 'canvas';
 import { snap } from './helpers.js';
 import { mapSides, buildMapPayload } from '../src/web/mapData.js';
 import { encodeIslands, parseIslands, townBox, IslandCache } from '../src/web/islands.js';
@@ -7,7 +8,9 @@ import { pollInterval, problemOf } from '../src/web/live.js';
 import { config } from '../src/config.js';
 import { SIDE_COLOR, sideOf, decodeIslands, islandClass, Grid, oceanOf } from '../web/src/geo.js';
 import { filterCommands, groupRows, targetCards, fmtCountdown, type Filters } from '../web/src/liveView.js';
-import { cmdKind, unitDef, UNIT_IDS, unitIcon } from '../web/src/icons.js';
+import { cmdKind, unitDef, UNIT_IDS, unitIcon, typeIcon, gp, gpUnit, GP_POS, GP_CMD_ORDER, GP_UNITS_VERSION } from '../web/src/icons.js';
+import { emptyFilters, parseViews, createView, renameView, closeView, updateActive, selectView, activeView, initialViews, loadViews, saveViews, storageKey, DEFAULT_ID } from '../web/src/views.js';
+import { GpCdn, GP_UNITS_VERSION as SERVER_GP_VERSION, GP_CMD_FILES } from '../src/web/gpcdn.js';
 import { WEB_STRINGS } from '../src/web/strings.js';
 import type { LiveCommand } from '../src/web/types.js';
 
@@ -136,14 +139,14 @@ describe('live overview helpers', () => {
     cmd('c', { arrival: 1100, ret: true }),
     cmd('d', { arrival: 1200, side: 'out', trg: end('X', 'Foe', 3), by: 'Other' }),
   ];
-  const f: Filters = { text: '', player: '', uploader: '', target: null, units: new Set(), returns: true, support: true, outgoing: true, other: true };
+  const f: Filters = emptyFilters();
   it('filters by view settings, units, target, uploader and text', () => {
     expect(filterCommands(all, f)).toHaveLength(4);
     expect(filterCommands(all, { ...f, returns: false }).map((c) => c.id)).toEqual(['a', 'b', 'd']);
     expect(filterCommands(all, { ...f, support: false, outgoing: false }).map((c) => c.id)).toEqual(['a', 'c']);
-    expect(filterCommands(all, { ...f, units: new Set(['bireme']) }).map((c) => c.id)).toEqual(['b']);
+    expect(filterCommands(all, { ...f, units: ['bireme'] }).map((c) => c.id)).toEqual(['b']);
     expect(filterCommands(all, { ...f, target: 3 }).map((c) => c.id)).toEqual(['d']);
-    expect(filterCommands(all, { ...f, uploader: 'Other' }).map((c) => c.id)).toEqual(['d']);
+    expect(filterCommands(all, { ...f, uploaders: { values: ['Other'], include: true } }).map((c) => c.id)).toEqual(['d']);
     expect(filterCommands(all, { ...f, text: 'foe' }).map((c) => c.id)).toEqual(['d']);
   });
   it('groups by target with headers in arrival order', () => {
@@ -176,5 +179,104 @@ describe('live overview helpers', () => {
     }
     expect(unitDef('some_new_ship').cat).toBe('naval');
     expect(unitDef('new_beast').cat).toBe('myth');
+  });
+});
+
+describe('/live saved views and multi-select filters', () => {
+  const end = (town: string, player: string, alliance: string) => ({ town, townId: town.length, player, playerId: player.length, alliance, allianceId: alliance.length });
+  const cmd = (id: string, src: ReturnType<typeof end>, trg: ReturnType<typeof end>, by: string, units: [string, number][] = [['sword', 1]]): LiveCommand =>
+    ({ id, type: 'attack', sub: '', arrival: 1000, started: null, src, trg, units, by, own: false, ret: false, planned: false, side: 'in' });
+  const all = [
+    cmd('a', end('S1', 'Enemy', 'RED'), end('T1', 'Me', 'BLUE'), 'Scout'),
+    cmd('b', end('S2', 'Enemy2', 'RED'), end('T2', 'You', 'BLUE'), 'Kleon'),
+    cmd('c', end('S3', 'Other', 'GREEN'), end('T1', 'Me', 'BLUE'), 'Scout', []),
+  ];
+  const ids = (f: ReturnType<typeof emptyFilters>) => filterCommands(all, f).map((c) => c.id);
+  it('include / exclude selections for towns, players, alliances and uploaders', () => {
+    const f = emptyFilters();
+    expect(ids({ ...f, towns: { values: ['T1'], include: true } })).toEqual(['a', 'c']);
+    expect(ids({ ...f, towns: { values: ['T1'], include: false } })).toEqual(['b']);
+    expect(ids({ ...f, players: { values: ['Enemy', 'Other'], include: true } })).toEqual(['a', 'c']);
+    expect(ids({ ...f, alliances: { values: ['GREEN'], include: false } })).toEqual(['a', 'b']);
+    expect(ids({ ...f, uploaders: { values: ['Scout'], include: false } })).toEqual(['b']);
+    expect(ids({ ...f, uploaders: { values: ['Scout'], include: true }, towns: { values: ['S3'], include: false } })).toEqual(['a']);
+    expect(ids({ ...f, uploaders: { values: [], include: false } })).toEqual(['a', 'b', 'c']); // empty selection = no filter
+  });
+  it('create, rename, switch, close and persist views', () => {
+    let s = initialViews();
+    expect(activeView(s).id).toBe(DEFAULT_ID);
+    s = createView(s, '005.', 'v1');
+    expect(s.active).toBe('v1');
+    s = updateActive(s, { f: { ...emptyFilters(), towns: { values: ['T1'], include: false }, units: ['bireme'] }, group: 'target' });
+    s = renameView(s, 'v1', '  Ops 5  ');
+    expect(activeView(s)).toMatchObject({ name: 'Ops 5', group: 'target' });
+    expect(renameView(s, DEFAULT_ID, 'x')).toBe(s); // Default can't be renamed
+    expect(closeView(s, DEFAULT_ID)).toBe(s); // ...or closed
+    const mem = new Map<string, string>();
+    const store = { getItem: (k: string) => mem.get(k) ?? null, setItem: (k: string, v: string) => void mem.set(k, v) };
+    const key = storageKey('Al', 'gr125');
+    saveViews(store, key, s);
+    const back = loadViews(store, key);
+    expect(back).toEqual(s);
+    expect(activeView(back).f.towns).toEqual({ values: ['T1'], include: false });
+    const s2 = selectView(back, DEFAULT_ID);
+    expect(activeView(s2).name).toBe('');
+    const closed = closeView(back, 'v1');
+    expect(closed.views.map((v) => v.id)).toEqual([DEFAULT_ID]);
+    expect(closed.active).toBe(DEFAULT_ID);
+    expect(storageKey('Al', 'gr125')).not.toBe(storageKey('Bo', 'gr125'));
+  });
+  it('survives garbage in storage', () => {
+    expect(parseViews('not json')).toEqual(initialViews());
+    expect(parseViews(JSON.stringify({ views: [{ id: 'x', name: 5, f: { towns: { values: [1, 'A'] }, group: 'weird' } }], active: 'nope' }))).toMatchObject({
+      active: DEFAULT_ID, views: [{ id: DEFAULT_ID }, { id: 'x', name: '5', group: 'none', f: { towns: { values: ['A'], include: true } } }],
+    });
+    expect(loadViews({ getItem: () => { throw new Error('blocked'); } }, 'k')).toEqual(initialViews());
+  });
+});
+
+describe('official Grepolis icons (runtime, with own fallback)', () => {
+  it('maps every unit, myth, ship and hero the sprite has; client and server agree on the version', () => {
+    expect(GP_UNITS_VERSION).toBe(SERVER_GP_VERSION);
+    for (const id of [...UNIT_IDS.land, ...UNIT_IDS.naval, ...UNIT_IDS.myth]) expect(gpUnit(id), id).not.toBeNull();
+    const heroes = UNIT_IDS.hero.filter((h) => gpUnit(h));
+    expect(heroes.length).toBeGreaterThanOrEqual(40);
+    const cells = Object.values(GP_POS).map(([c, r]) => `${c},${r}`);
+    expect(new Set(cells).size).toBe(cells.length); // no two units share a cell
+    for (const [c, r] of Object.values(GP_POS)) { expect(c).toBeLessThan(9); expect(r).toBeLessThan(9); }
+    expect(gpUnit('cyclops')).toEqual(GP_POS.zyklop);
+    expect(GP_CMD_ORDER).toHaveLength(GP_CMD_FILES.length);
+  });
+  it('uses the sprite when it loaded, the own SVG otherwise', () => {
+    gp.units = false; gp.cmds = false;
+    expect(unitIcon('sword', 'Sword')).toContain('<svg');
+    expect(typeIcon('attack', 'Attack')).toContain('<svg');
+    gp.units = true; gp.cmds = true;
+    try {
+      const u = unitIcon('sword', 'Sword', 20);
+      expect(u).toContain('/gpcdn/units.jpg'); expect(u).toContain('-160px 0px/180px 180px');
+      expect(unitIcon('brand_new_unit', 'X')).toContain('<svg'); // unknown → own icon
+      expect(typeIcon('support', 'Support', 30)).toContain('-30px 0/180px');
+      expect(typeIcon('other', 'Other')).toContain('<svg');
+    } finally { gp.units = false; gp.cmds = false; }
+  });
+  it('fetches once, caches, and backs off after a failure', async () => {
+    const png = createCanvas(360, 360).toBuffer('image/png');
+    const seen: string[] = []; let fail = true; let t = 0;
+    const f = (async (u: string) => { seen.push(String(u)); return fail ? new Response('x', { status: 503 }) : new Response(new Uint8Array(png)); }) as unknown as typeof fetch;
+    const c = new GpCdn(f, () => t, 'https://cdn.test');
+    expect(await c.get('units')).toBeNull();
+    expect(await c.get('units')).toBeNull();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(`https://cdn.test/images/game/autogenerated/units/unit_icons_40x40_${SERVER_GP_VERSION}.png`);
+    fail = false; t += 11 * 60_000;
+    const a = await c.get('units');
+    expect(a?.body.length).toBeGreaterThan(0);
+    expect(['image/jpeg', 'image/png']).toContain(a?.type);
+    expect(await c.get('units')).toBe(a);
+    const cm = await c.get('cmds');
+    expect(seen.filter((u) => u.includes('unit_overview'))).toHaveLength(GP_CMD_FILES.length);
+    expect(cm?.type).toBe('image/png');
+    expect(await new GpCdn(f, () => 0, '').get('units')).toBeNull(); // disabled
   });
 });

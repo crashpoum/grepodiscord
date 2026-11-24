@@ -9,6 +9,7 @@ import { issueSession, sign, verify, webSecret, bearer } from '../src/web/auth.j
 import { activeCommands, Budget, LiveHub, normUnits } from '../src/web/live.js';
 import { buildMapPayload } from '../src/web/mapData.js';
 import { IslandCache } from '../src/web/islands.js';
+import { GpCdn } from '../src/web/gpcdn.js';
 import { gzipSync } from 'node:zlib';
 import { createWebApp, dashboardLink, type BotGuilds } from '../src/web/server.js';
 import { esc, messagePage } from '../src/web/pages.js';
@@ -277,7 +278,7 @@ describe('web server: caching and live status', () => {
     const secret = 'z'.repeat(32);
     const islandsTxt = '1,450,530,1,20,1,2\n2,455,535,15,10,1,2';
     const islands = new IslandCache((async () => new Response(gzipSync(Buffer.from(islandsTxt)))) as unknown as typeof fetch);
-    const app = createWebApp({ ctx: c, guilds: { has: (g) => g === 'g1', name: () => 'Red', check: async () => 'yes' }, secret, staticDir: null, fetchImpl: fetch, islands,
+    const app = createWebApp({ ctx: c, guilds: { has: (g) => g === 'g1', name: () => 'Red', check: async () => 'yes' }, secret, staticDir: null, fetchImpl: fetch, islands, gpcdn: new GpCdn((async () => new Response('no', { status: 404 })) as unknown as typeof fetch, Date.now, 'https://cdn.test'),
       hub: new LiveHub(c, async () => [10], { pollSeconds: 20, rpm: 5, now: Date.now }) });
     const srv = http.createServer(app.handler);
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
@@ -299,6 +300,10 @@ describe('web server: caching and live status', () => {
       const lv = await live.json() as { status?: { state: string; intervalSec: number } };
       expect(lv.status?.state).toBeTruthy();
       expect(lv.status?.intervalSec).toBeGreaterThan(0);
+      // official icon proxy: whitelisted names only; CDN down → 503 so the client keeps its own icons
+      expect((await fetch(`${base}/gpcdn/units.jpg?v=1`)).status).toBe(503);
+      expect((await fetch(`${base}/gpcdn/other.png`)).status).toBe(404);
+      expect((await fetch(`${base}/gpcdn/..%2fapi%2fme`)).status).toBe(404);
     } finally { app.hub.stop(); srv.close(); }
   });
 });

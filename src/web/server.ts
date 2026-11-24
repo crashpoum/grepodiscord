@@ -22,6 +22,7 @@ import { log } from '../log.js';
 import { t, type Lang } from '../i18n.js';
 import { guildSides } from '../bot/insights.js';
 import { IslandCache } from './islands.js';
+import { GpCdn } from './gpcdn.js';
 import { mapSides } from './mapData.js';
 import { unitName } from '../bot/warPoster.js';
 import { UNIT_EN } from '../planner.js';
@@ -44,7 +45,7 @@ export interface BotGuilds {
   member?(guildId: string, userId: string): Promise<Presence>;
   diag?(): string;
 }
-export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; now?: () => number }
+export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; gpcdn?: GpCdn; now?: () => number }
 
 type AuthFail = 'none' | 'bad' | 'expired' | 'guild';
 const AUTH_KEY = { none: 'web.err.login', bad: 'web.err.badLink', expired: 'web.err.auth', guild: 'web.err.botGone' } as const;
@@ -130,6 +131,7 @@ export function createWebApp(deps: WebDeps) {
   };
   hub = deps.hub ?? new LiveHub(ctx, async (g, w) => { const sd = sidesOf(g, await ctx.worlds.ensure(w)); return [...sd.ours, ...sd.allies]; });
   const islands = deps.islands ?? new IslandCache(fetchImpl, now);
+  const gpcdn = deps.gpcdn ?? new GpCdn(fetchImpl, now);
   const staticDir = deps.staticDir === undefined ? findStaticDir() : deps.staticDir;
   const limiter = new IpLimiter(20, now);
   const mapCache = new Map<string, { key: unknown; at: number; body: Buffer; gz: Buffer; etag: string; sides: string }>();
@@ -255,6 +257,15 @@ export function createWebApp(deps: WebDeps) {
         if (/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) return send(res, 200, f.gz, type, { ...hdr, 'Content-Encoding': 'gzip' });
         return send(res, 200, f.raw, type, hdr);
       }
+    }
+    // Official Grepolis icons (whitelisted, fetched + cached server-side; see gpcdn.ts). Public: plain images, no data.
+    const gm = req.method === 'GET' ? /^\/gpcdn\/(units|cmds)\.(?:jpg|png)$/.exec(p) : null;
+    if (gm) {
+      const a = await gpcdn.get(gm[1] as 'units' | 'cmds');
+      if (!a) return send(res, 503, 'unavailable', 'text/plain', { 'Cache-Control': 'no-store' });
+      const hdr = { 'Cache-Control': url.searchParams.has('v') ? 'public, max-age=604800, immutable' : 'public, max-age=86400', ETag: a.etag };
+      if (req.headers['if-none-match'] === a.etag) { res.writeHead(304, hdr); return void res.end(); }
+      return send(res, 200, a.body, a.type, hdr);
     }
     if (p === '/healthz') return send(res, 200, 'ok', 'text/plain');
     if (p === '/terms') return html(res, 200, termsPage(config.privacyContact));

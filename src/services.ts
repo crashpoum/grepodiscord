@@ -12,8 +12,9 @@ import { findCodeTown, isExpired } from './verify.js';
 import { t, type Lang } from './i18n.js';
 import type { PendingVerification } from './db.js';
 import { log } from './log.js';
+import type { Gemini } from './ai/gemini.js';
 
-export interface Ctx { store: Store; worlds: WorldManager; gd: GrepoDataClient }
+export interface Ctx { store: Store; worlds: WorldManager; gd: GrepoDataClient; ai?: Gemini }
 export interface CardResult { embed: APIEmbed; chart: Buffer | null }
 
 /** Autocomplete values are "id:<n>"; free text is matched by name. */

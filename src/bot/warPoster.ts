@@ -16,6 +16,7 @@ import { worldTz } from '../time.js';
 import { buildBoard, nextBaselines, renderBoard, resolveSides } from '../war.js';
 import type { WorldSnapshot } from '../data/snapshot.js';
 import { getWorldInfo, peekWorldInfo } from '../data/worldInfo.js';
+import { boardExtras } from './insights.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const langOf = (ctx: Ctx, guildId: string): Lang => ctx.store.getGuild(guildId, config.defaultLang).lang;
@@ -30,7 +31,8 @@ export async function boardComponents(ctx: Ctx, board: Board) {
   const snap = await ctx.worlds.ensure(board.world);
   const at = now();
   const model = buildBoard(snap, sidesFor(ctx, board.guildId, snap, at), ctx.store.getBaselines(board.world, 'p'), at);
-  return renderBoard(model, snap, langOf(ctx, board.guildId), board.id);
+  const lang = langOf(ctx, board.guildId);
+  return renderBoard(model, snap, lang, board.id, boardExtras(ctx, board.guildId, snap, lang, at));
 }
 
 /** Edit the board message in place; repost if it was deleted. Returns false if the channel is unusable. */

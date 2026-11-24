@@ -10,7 +10,14 @@ function* walk(nodes: Node[], path: string[] = []): Generator<[Node, string[]]> 
 }
 
 describe('slash commands: Greek localization', () => {
-  const cmds = commandJson() as unknown as Node[];
+  const all = commandJson() as unknown as Node[];
+  const cmds = all.filter((c) => (c.type ?? 1) === 1); // slash commands; message actions are checked separately
+
+  it('message actions (right-click → Apps) have a Greek name', () => {
+    const ctxMenus = all.filter((c) => c.type === 3);
+    expect(ctxMenus.length).toBeGreaterThan(0);
+    for (const c of ctxMenus) { expect(c.name_localizations?.el, c.name).toBeTruthy(); expect(c.name.length).toBeLessThanOrEqual(32); }
+  });
 
   it('every command, subcommand and option has a valid Greek name and description', () => {
     const missing: string[] = [];

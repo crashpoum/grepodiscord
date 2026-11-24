@@ -13,6 +13,7 @@ import { resolveAlliance, resolveTown, type Ctx } from '../services.js';
 import { findThreats, threatMessage } from '../threats.js';
 import { worldTz } from '../time.js';
 import { safeEmbed } from './errors.js';
+import { BOARD_KEYS } from './insights.js';
 import { boardComponents, notifyOpMember, rollBaselines, sidesFor, unitName, updateBoard } from './warPoster.js';
 
 const COLOR_OK = 0x57f287;
@@ -20,19 +21,19 @@ const COLOR_WARN = 0xfee75c;
 const PRIVATE = { flags: MessageFlags.Ephemeral } as const;
 const nowSec = () => Math.floor(Date.now() / 1000);
 
-async function say(i: ChatInputCommandInteraction, description: string, opts: { ephemeral?: boolean; color?: number; embed?: APIEmbed } = {}) {
+export async function say(i: ChatInputCommandInteraction, description: string, opts: { ephemeral?: boolean; color?: number; embed?: APIEmbed } = {}) {
   const embed = safeEmbed(opts.embed ?? { description, color: opts.color ?? COLOR_OK });
   if (i.deferred || i.replied) return void (await i.editReply({ embeds: [embed] }));
   await i.reply({ embeds: [embed], ...(opts.ephemeral ? PRIVATE : {}) });
 }
 
-function worldOf(ctx: Ctx, i: ChatInputCommandInteraction): string {
+export function worldOf(ctx: Ctx, i: ChatInputCommandInteraction): string {
   const w = i.options.getString('world')?.trim().toLowerCase() || (i.guildId ? ctx.store.getGuild(i.guildId).world : null);
   if (!w) throw new UserError('err.noWorld');
   if (!isValidWorldId(w)) throw new UserError('err.badWorld', { world: w, markets: config.markets.join('/') });
   return w;
 }
-const isAdmin = (i: ChatInputCommandInteraction) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
+export const isAdmin = (i: ChatInputCommandInteraction) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
 
 // ---------------------------------------------------------------- /warroom
 export async function handleWarroom(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
@@ -66,6 +67,15 @@ export async function handleWarroom(ctx: Ctx, i: ChatInputCommandInteraction, la
     let n = 0;
     for (const b of ctx.store.boardsForGuild(guildId)) if (await updateBoard(i.client, ctx, b)) n++;
     return say(i, t(lang, 'war.refreshed', { n }));
+  }
+  if (sub === 'options') {
+    const q = i.options.getBoolean('quitters');
+    const so = i.options.getBoolean('soft_targets');
+    if (q !== null) ctx.store.setSetting(guildId, BOARD_KEYS.quitters, q ? '1' : null);
+    if (so !== null) ctx.store.setSetting(guildId, BOARD_KEYS.soft, so ? '1' : null);
+    const yes = (k: string) => t(lang, ctx.store.getSetting(guildId, k) === '1' ? 'war.optOn' : 'war.optOff');
+    if (q !== null || so !== null) for (const b of ctx.store.boardsForGuild(guildId)) await updateBoard(i.client, ctx, b);
+    return say(i, t(lang, 'war.options', { quitters: yes(BOARD_KEYS.quitters), soft: yes(BOARD_KEYS.soft) }));
   }
   const world = worldOf(ctx, i);
   const snap = await ctx.worlds.ensure(world);

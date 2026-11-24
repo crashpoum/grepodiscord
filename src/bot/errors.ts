@@ -5,6 +5,7 @@
  */
 import type { APIEmbed } from 'discord.js';
 import { GrepoDataError } from '../data/grepodata.js';
+import { GeminiError } from '../ai/gemini.js';
 import { UserError } from '../gdServices.js';
 import type { StringKey } from '../i18n.js';
 import { log } from '../log.js';
@@ -19,6 +20,7 @@ export function classifyError(e: unknown): Classified {
     if (e.status === 404) return { key: 'gd.notFound', vars: {}, expected: true };
     return { key: 'gd.unavailable', vars: {}, expected: true };
   }
+  if (e instanceof GeminiError) return { key: `ai.${e.kind}` as StringKey, vars: {}, expected: true };
   const err = e as { name?: string; message?: string; code?: unknown; cause?: unknown };
   const code = typeof err?.code === 'number' ? err.code : undefined;
   // discord.js DiscordAPIError: 50001 Missing Access, 50013 Missing Permissions

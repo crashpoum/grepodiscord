@@ -10,6 +10,8 @@ import { handleAutocomplete, handleCommand } from './bot/handlers.js';
 import { startScheduler } from './bot/scheduler.js';
 import { handleButton } from './bot/warPoster.js';
 import { seedEnvToken } from './gdAuth.js';
+import { Gemini } from './ai/gemini.js';
+import { handleReportContext, handleReportModal } from './bot/aiHandlers.js';
 
 if (!config.discordToken) {
   console.error('DISCORD_TOKEN is not set. For a token-free dry run use: npm run cli -- --help');
@@ -17,7 +19,9 @@ if (!config.discordToken) {
 }
 
 const store = new Store(resolveDbPath(config.dbPath, (m) => log.info(m)));
-const ctx = { store, worlds: new WorldManager(store), gd: new GrepoDataClient() };
+const ai = new Gemini({ apiKey: config.geminiApiKey, model: config.geminiModel, rpm: config.geminiRpm, rpd: config.geminiRpd, store });
+const ctx = { store, worlds: new WorldManager(store), gd: new GrepoDataClient(), ai };
+log.info(ai.available ? `Gemini: ${ai.model} (free tier caps: ${config.geminiRpm}/min, ${config.geminiRpd}/day)` : 'Gemini: no GEMINI_API_KEY (reports disabled, newspaper uses the template)');
 for (const w of store.trackedWorlds()) ctx.worlds.loadFromCache(w);
 seedEnvToken(store);
 
@@ -37,6 +41,8 @@ client.on(Events.InteractionCreate, (i) => {
   if (i.isAutocomplete()) void handleAutocomplete(ctx, i);
   else if (i.isChatInputCommand()) void handleCommand(ctx, i);
   else if (i.isButton()) void handleButton(ctx, i);
+  else if (i.isModalSubmit()) void handleReportModal(ctx, i);
+  else if (i.isMessageContextMenuCommand()) void handleReportContext(ctx, i);
 });
 
 client.on(Events.Error, (e) => log.error('discord client error', e));

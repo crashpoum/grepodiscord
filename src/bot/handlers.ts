@@ -13,6 +13,8 @@ import { syncGuildRoles } from './poster.js';
 import { gdAdmin, gdIntel, gdPublic } from './gdHandlers.js';
 import { classifyError, logError, safeEmbed } from './errors.js';
 import { handleOp, handleAlerts, handleWarroom, opAutocomplete } from './opsHandlers.js';
+import { handleQuitRisk, radarSoft } from './insights.js';
+import { handleNewspaper, handleReport } from './aiHandlers.js';
 
 const COLOR_OK = 0x57f287;
 const COLOR_ERR = 0xed4245;
@@ -79,6 +81,14 @@ export async function handleCommand(ctx: Ctx, i: ChatInputCommandInteraction) {
       case 'warroom': return await handleWarroom(ctx, i, lang);
       case 'alerts': return await handleAlerts(ctx, i, lang);
       case 'op': return await handleOp(ctx, i, lang);
+      case 'report': return await handleReport(ctx, i, lang);
+      case 'newspaper': return await handleNewspaper(ctx, i, lang);
+      case 'quitrisk': {
+        const world = await requireWorld(ctx, i, lang);
+        if (!world) return;
+        await i.deferReply();
+        return await handleQuitRisk(ctx, i, lang, world);
+      }
       case 'top': case 'wars': case 'changes': case 'conquests': case 'town': case 'intel': {
         const world = await requireWorld(ctx, i, lang);
         if (!world) return;
@@ -146,6 +156,7 @@ async function radar(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
   const world = await requireWorld(ctx, i, lang);
   if (!world) return;
   await i.deferReply();
+  if (i.options.getSubcommand() === 'soft') return radarSoft(ctx, i, lang, world);
   const args = {
     oceans: parseOceanList(i.options.getString('ocean')), nearTown: i.options.getString('near_town') ?? undefined,
     radius: i.options.getInteger('radius') ?? undefined, hours: i.options.getInteger('hours') ?? undefined,

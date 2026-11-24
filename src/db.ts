@@ -32,6 +32,15 @@ export interface OpMember {
   opId: number; userId: string; originTownId: number; unit: string; travelSecs: number; estimated: boolean; uncertainty: number;
   sendAt: number; mods: OpMods; assignedBy: string | null; notified: boolean; reminded: boolean;
 }
+export interface DailyRow { id: number; allianceId: number | null; points: number; abp: number; dbp: number; towns: number; members?: number }
+export interface DailySet { day: string; rows: Map<number, DailyRow> }
+export interface ReportRow {
+  id: number; guildId: string; world: string; kind: string; reportTime: number | null;
+  attPlayer: string | null; attAlliance: string | null; attTown: string | null; attTownId: number | null;
+  defPlayer: string | null; defAlliance: string | null; defTown: string | null; defTownId: number | null;
+  data: unknown; source: 'text' | 'image'; createdBy: string; createdAt: number;
+}
+export interface Newspaper { guildId: string; channelId: string; world: string; weekday: number; hour: number; enabled: boolean; lastSentDay: string | null; lastError: string | null; createdBy: string | null }
 export interface PendingVerification { guildId: string; userId: string; world: string; playerId: number; code: string; createdAt: number }
 
 const SCHEMA = `
@@ -53,6 +62,18 @@ CREATE TABLE IF NOT EXISTS threat_subs (guild_id TEXT NOT NULL, user_id TEXT NOT
 CREATE TABLE IF NOT EXISTS ops (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, world TEXT NOT NULL, name TEXT, target_town_id INTEGER NOT NULL, land_at INTEGER NOT NULL, creator_id TEXT NOT NULL, channel_id TEXT, status TEXT NOT NULL DEFAULT 'open', created_at INTEGER);
 CREATE TABLE IF NOT EXISTS op_members (op_id INTEGER NOT NULL, user_id TEXT NOT NULL, origin_town_id INTEGER NOT NULL, unit TEXT NOT NULL, travel_secs INTEGER NOT NULL, estimated INTEGER NOT NULL, uncertainty INTEGER NOT NULL DEFAULT 0, send_at INTEGER NOT NULL, mods_json TEXT NOT NULL DEFAULT '{}', assigned_by TEXT, notified INTEGER NOT NULL DEFAULT 0, reminded INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (op_id, user_id, origin_town_id));
 CREATE INDEX IF NOT EXISTS op_members_send ON op_members(reminded, send_at);
+-- v1.3 (batch 2): daily history (soft targets, quit risk, newspaper), settings, AI reports, newspaper schedule. Additive only.
+CREATE TABLE IF NOT EXISTS player_daily (world TEXT NOT NULL, day TEXT NOT NULL, player_id INTEGER NOT NULL, alliance_id INTEGER, points INTEGER, abp INTEGER, dbp INTEGER, towns INTEGER, PRIMARY KEY (world, day, player_id));
+CREATE TABLE IF NOT EXISTS alliance_daily (world TEXT NOT NULL, day TEXT NOT NULL, alliance_id INTEGER NOT NULL, points INTEGER, abp INTEGER, dbp INTEGER, towns INTEGER, members INTEGER, PRIMARY KEY (world, day, alliance_id));
+CREATE TABLE IF NOT EXISTS guild_settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (guild_id, key));
+CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, world TEXT NOT NULL, kind TEXT NOT NULL, report_time INTEGER,
+  att_player TEXT, att_alliance TEXT, att_town TEXT, att_town_id INTEGER, def_player TEXT, def_alliance TEXT, def_town TEXT, def_town_id INTEGER,
+  data_json TEXT NOT NULL, source TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS reports_def ON reports(guild_id, def_town_id);
+CREATE INDEX IF NOT EXISTS reports_att ON reports(guild_id, att_town_id);
+CREATE TABLE IF NOT EXISTS newspapers (guild_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, world TEXT NOT NULL, weekday INTEGER NOT NULL DEFAULT 0, hour INTEGER NOT NULL DEFAULT 20,
+  enabled INTEGER NOT NULL DEFAULT 1, last_sent_day TEXT, last_error TEXT, created_by TEXT, updated_at INTEGER);
+CREATE TABLE IF NOT EXISTS ai_usage (day TEXT NOT NULL, model TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, model));
 `;
 
 export class Store implements FileStore {
@@ -115,7 +136,7 @@ export class Store implements FileStore {
 
   /** Worlds the bot must keep fresh: guild default worlds + feed worlds + linked worlds. */
   trackedWorlds(): string[] {
-    const rows = this.db.prepare(`SELECT world FROM guild_config WHERE world IS NOT NULL UNION SELECT world FROM feeds UNION SELECT world FROM links UNION SELECT world FROM pending_verifications UNION SELECT world FROM boards UNION SELECT world FROM ops WHERE status = 'open'`).all() as { world: string }[];
+    const rows = this.db.prepare(`SELECT world FROM guild_config WHERE world IS NOT NULL UNION SELECT world FROM feeds UNION SELECT world FROM links UNION SELECT world FROM pending_verifications UNION SELECT world FROM boards UNION SELECT world FROM ops WHERE status = 'open' UNION SELECT world FROM newspapers WHERE enabled = 1`).all() as { world: string }[];
     return [...new Set(rows.map((r) => r.world))].sort();
   }
 
@@ -335,5 +356,124 @@ export class Store implements FileStore {
     const rows = this.db.prepare(`SELECT m.*, o.guild_id AS g FROM op_members m JOIN ops o ON o.id = m.op_id
       WHERE o.status = 'open' AND m.reminded = 0 AND m.send_at <= ? AND m.send_at >= ?`).all(now + leadSec, now - graceSec) as Record<string, unknown>[];
     return rows.map((r) => ({ ...this.rowToMember(r), guildId: String(r.g) }));
+  }
+
+  // ---- daily history (one row per player/alliance per world-local day; the last refresh of the day wins)
+  recordDaily(world: string, day: string, players: DailyRow[], alliances: DailyRow[], keepDays = 40) {
+    this.db.exec('BEGIN');
+    try {
+      const p = this.db.prepare('INSERT OR REPLACE INTO player_daily (world, day, player_id, alliance_id, points, abp, dbp, towns) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const r of players) p.run(world, day, r.id, r.allianceId, r.points, r.abp, r.dbp, r.towns);
+      const a = this.db.prepare('INSERT OR REPLACE INTO alliance_daily (world, day, alliance_id, points, abp, dbp, towns, members) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const r of alliances) a.run(world, day, r.id, r.points, r.abp, r.dbp, r.towns, r.members ?? 0);
+      const cutoff = new Date(Date.parse(`${day}T00:00:00Z`) - keepDays * 86_400_000).toISOString().slice(0, 10);
+      this.db.prepare('DELETE FROM player_daily WHERE world = ? AND day < ?').run(world, cutoff);
+      this.db.prepare('DELETE FROM alliance_daily WHERE world = ? AND day < ?').run(world, cutoff);
+      this.db.exec('COMMIT');
+    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  /** Days with history for a world (ascending). */
+  historyDays(world: string, kind: 'p' | 'a' = 'p'): string[] {
+    const tbl = kind === 'p' ? 'player_daily' : 'alliance_daily';
+    return (this.db.prepare(`SELECT DISTINCT day FROM ${tbl} WHERE world = ? ORDER BY day`).all(world) as { day: string }[]).map((r) => r.day);
+  }
+  /** The stored day closest to (but not after) `day`; else the oldest stored day. */
+  dailyAt(world: string, kind: 'p' | 'a', day: string): DailySet | null {
+    const days = this.historyDays(world, kind);
+    if (!days.length) return null;
+    const pick = [...days].reverse().find((d) => d <= day) ?? days[0];
+    const tbl = kind === 'p' ? 'player_daily' : 'alliance_daily';
+    const idCol = kind === 'p' ? 'player_id' : 'alliance_id';
+    const rows = this.db.prepare(`SELECT * FROM ${tbl} WHERE world = ? AND day = ?`).all(world, pick) as Record<string, unknown>[];
+    return {
+      day: pick,
+      rows: new Map(rows.map((r) => [Number(r[idCol]), {
+        id: Number(r[idCol]), allianceId: kind === 'p' ? (r.alliance_id == null ? null : Number(r.alliance_id)) : Number(r[idCol]),
+        points: Number(r.points), abp: Number(r.abp), dbp: Number(r.dbp), towns: Number(r.towns), members: r.members == null ? undefined : Number(r.members),
+      }])),
+    };
+  }
+  playerSeries(world: string, playerId: number): (DailyRow & { day: string })[] {
+    return (this.db.prepare('SELECT * FROM player_daily WHERE world = ? AND player_id = ? ORDER BY day').all(world, playerId) as Record<string, unknown>[]).map((r) => ({
+      day: String(r.day), id: playerId, allianceId: r.alliance_id == null ? null : Number(r.alliance_id), points: Number(r.points), abp: Number(r.abp), dbp: Number(r.dbp), towns: Number(r.towns),
+    }));
+  }
+
+  // ---- per-guild settings (small key/value)
+  getSetting(guildId: string, key: string): string | null {
+    const r = this.db.prepare('SELECT value FROM guild_settings WHERE guild_id = ? AND key = ?').get(guildId, key) as { value: string | null } | undefined;
+    return r?.value ?? null;
+  }
+  setSetting(guildId: string, key: string, value: string | null) {
+    if (value === null) this.db.prepare('DELETE FROM guild_settings WHERE guild_id = ? AND key = ?').run(guildId, key);
+    else this.db.prepare('INSERT INTO guild_settings (guild_id, key, value) VALUES (?, ?, ?) ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value').run(guildId, key, value);
+  }
+
+  // ---- parsed battle reports (per guild = per alliance)
+  private rowToReport = (r: Record<string, unknown>): ReportRow => {
+    const s = (k: string) => (r[k] == null ? null : String(r[k]));
+    const n = (k: string) => (r[k] == null ? null : Number(r[k]));
+    return {
+      id: Number(r.id), guildId: String(r.guild_id), world: String(r.world), kind: String(r.kind), reportTime: n('report_time'),
+      attPlayer: s('att_player'), attAlliance: s('att_alliance'), attTown: s('att_town'), attTownId: n('att_town_id'),
+      defPlayer: s('def_player'), defAlliance: s('def_alliance'), defTown: s('def_town'), defTownId: n('def_town_id'),
+      data: JSON.parse(String(r.data_json || '{}')), source: r.source === 'image' ? 'image' : 'text', createdBy: String(r.created_by), createdAt: Number(r.created_at),
+    };
+  };
+  addReport(x: Omit<ReportRow, 'id'>): number {
+    return Number(this.db.prepare(`INSERT INTO reports (guild_id, world, kind, report_time, att_player, att_alliance, att_town, att_town_id, def_player, def_alliance, def_town, def_town_id, data_json, source, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(x.guildId, x.world, x.kind, x.reportTime, x.attPlayer, x.attAlliance, x.attTown, x.attTownId, x.defPlayer, x.defAlliance, x.defTown, x.defTownId,
+      JSON.stringify(x.data), x.source, x.createdBy, x.createdAt).lastInsertRowid);
+  }
+  getReport(guildId: string, id: number): ReportRow | null {
+    const r = this.db.prepare('SELECT * FROM reports WHERE guild_id = ? AND id = ?').get(guildId, id) as Record<string, unknown> | undefined;
+    return r ? this.rowToReport(r) : null;
+  }
+  /** Reports about a town (as target or origin), by id or, for unresolved names, by name. Newest first. */
+  searchReports(guildId: string, q: { townId?: number | null; townName?: string | null; kind?: string | null; limit?: number; offset?: number }): { rows: ReportRow[]; total: number } {
+    const where = ['guild_id = ?'];
+    const args: (string | number)[] = [guildId];
+    const ors: string[] = [];
+    if (q.townId != null) { ors.push('def_town_id = ?', 'att_town_id = ?'); args.push(q.townId, q.townId); }
+    if (q.townName) { ors.push('lower(def_town) = lower(?)', 'lower(att_town) = lower(?)'); args.push(q.townName, q.townName); }
+    if (ors.length) where.push(`(${ors.join(' OR ')})`);
+    if (q.kind) { where.push('kind = ?'); args.push(q.kind); }
+    const w = where.join(' AND ');
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS n FROM reports WHERE ${w}`).get(...args) as { n: number }).n);
+    const rows = (this.db.prepare(`SELECT * FROM reports WHERE ${w} ORDER BY COALESCE(report_time, created_at / 1000) DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(...args, q.limit ?? 10, q.offset ?? 0) as Record<string, unknown>[]).map(this.rowToReport);
+    return { rows, total };
+  }
+  removeReport(guildId: string, id: number): boolean { return Number(this.db.prepare('DELETE FROM reports WHERE guild_id = ? AND id = ?').run(guildId, id).changes) > 0; }
+
+  // ---- weekly newspaper
+  private rowToPaper = (r: Record<string, unknown>): Newspaper => ({
+    guildId: String(r.guild_id), channelId: String(r.channel_id), world: String(r.world), weekday: Number(r.weekday), hour: Number(r.hour), enabled: Number(r.enabled) === 1,
+    lastSentDay: r.last_sent_day == null ? null : String(r.last_sent_day), lastError: r.last_error == null ? null : String(r.last_error), createdBy: r.created_by == null ? null : String(r.created_by),
+  });
+  setNewspaper(n: { guildId: string; channelId: string; world: string; weekday: number; hour: number; createdBy: string }) {
+    this.db.prepare(`INSERT INTO newspapers (guild_id, channel_id, world, weekday, hour, enabled, created_by, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+      ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id, world=excluded.world, weekday=excluded.weekday, hour=excluded.hour, enabled=1, created_by=excluded.created_by, updated_at=excluded.updated_at`)
+      .run(n.guildId, n.channelId, n.world, n.weekday, n.hour, n.createdBy, Date.now());
+  }
+  getNewspaper(guildId: string): Newspaper | null {
+    const r = this.db.prepare('SELECT * FROM newspapers WHERE guild_id = ?').get(guildId) as Record<string, unknown> | undefined;
+    return r ? this.rowToPaper(r) : null;
+  }
+  enabledNewspapers(): Newspaper[] { return (this.db.prepare('SELECT * FROM newspapers WHERE enabled = 1').all() as Record<string, unknown>[]).map(this.rowToPaper); }
+  disableNewspaper(guildId: string): boolean { return Number(this.db.prepare('UPDATE newspapers SET enabled = 0 WHERE guild_id = ?').run(guildId).changes) > 0; }
+  markNewspaper(guildId: string, day: string | null, error: string | null) {
+    if (day) this.db.prepare('UPDATE newspapers SET last_sent_day = ?, last_error = ? WHERE guild_id = ?').run(day, error, guildId);
+    else this.db.prepare('UPDATE newspapers SET last_error = ? WHERE guild_id = ?').run(error, guildId);
+  }
+
+  // ---- Gemini usage (requests per Pacific day, to stay under the free-tier daily quota)
+  aiUsage(day: string, model: string): number {
+    const r = this.db.prepare('SELECT count FROM ai_usage WHERE day = ? AND model = ?').get(day, model) as { count: number } | undefined;
+    return r ? Number(r.count) : 0;
+  }
+  bumpAiUsage(day: string, model: string, by = 1) {
+    this.db.prepare('INSERT INTO ai_usage (day, model, count) VALUES (?, ?, ?) ON CONFLICT(day, model) DO UPDATE SET count = count + excluded.count').run(day, model, by);
+    this.db.prepare('DELETE FROM ai_usage WHERE day < ?').run(new Date(Date.parse(`${day}T00:00:00Z`) - 14 * 86_400_000).toISOString().slice(0, 10));
   }
 }

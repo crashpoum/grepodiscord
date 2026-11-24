@@ -61,7 +61,7 @@ export class TownGrid {
   private key(x: number, y: number) { return `${Math.floor(x / this.cell)}:${Math.floor(y / this.cell)}`; }
   get size() { let n = 0; for (const a of this.cells.values()) n += a.length; return n; }
   /** Nearest town within `maxDist` (island units), or null. */
-  nearest(x: number, y: number, maxDist: number): { town: Town; dist: number } | null {
+  nearest(x: number, y: number, maxDist: number, where?: (t: Town) => boolean): { town: Town; dist: number } | null {
     const r = Math.ceil(maxDist / this.cell);
     const cx = Math.floor(x / this.cell);
     const cy = Math.floor(y / this.cell);
@@ -69,7 +69,7 @@ export class TownGrid {
     for (let i = cx - r; i <= cx + r; i++) for (let j = cy - r; j <= cy + r; j++) {
       for (const tw of this.cells.get(`${i}:${j}`) ?? []) {
         const d = distance(x, y, tw.islandX, tw.islandY);
-        if (d <= maxDist && (!best || d < best.dist)) best = { town: tw, dist: d };
+        if (d <= maxDist && (!best || d < best.dist) && (!where || where(tw))) best = { town: tw, dist: d };
       }
     }
     return best;
@@ -166,11 +166,11 @@ export function nextBaselines(snap: WorldSnapshot, current: Map<number, Baseline
 }
 
 // ---------------------------------------------------------------- rendering (Components V2 JSON)
-const md = (s: string) => s.replace(/([*_`~|\\>])/g, '\\$1');
+export const md = (s: string) => s.replace(/([*_`~|\\>])/g, '\\$1');
 /** Discord limit: all Text Display content in one message ≤ 4000 characters. */
 export const V2_TEXT_LIMIT = 4000;
 
-export function renderBoard(m: BoardModel, snap: WorldSnapshot, lang: Lang, boardId: number) {
+export function renderBoard(m: BoardModel, snap: WorldSnapshot, lang: Lang, boardId: number, extra: string[] = []) {
   const an = (id: number | null) => (id === null ? '-' : md(snap.alliances.get(id)?.name ?? `#${id}`));
   const pn = (id: number | null) => (id === null ? t(lang, 'feed.conquest.ghost') : md(snap.players.get(id)?.name ?? `#${id}`));
   const tn = (id: number) => md(snap.towns.get(id)?.name ?? `#${id}`);
@@ -204,7 +204,7 @@ export function renderBoard(m: BoardModel, snap: WorldSnapshot, lang: Lang, boar
   if (thr.length === 1) thr.push(t(lang, 'war.noThreats'));
 
   const foot = `-# ${t(lang, 'war.footer', { t: ts(m.now), id: boardId })}`;
-  const blocks = [head, sc, rec, mov, thr.join('\n'), foot];
+  const blocks = [head, sc, rec, mov, thr.join('\n'), ...extra, foot];
   // Enforce the 4000-char total: trim the longest blocks line by line.
   const total = () => blocks.reduce((s, b) => s + b.length, 0);
   while (total() > V2_TEXT_LIMIT) {

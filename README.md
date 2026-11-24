@@ -21,6 +21,10 @@ MIT licensed. TypeScript, discord.js v14, SQLite via Node's built-in `node:sqlit
 | War room (admins) | `/warroom place [channel]` · `/warroom remove id` · `/warroom list` · `/warroom refresh` · `/warroom ally alliance` · `/warroom enemy alliance` · `/warroom unset alliance` | A Components V2 board that **edits itself** after every hourly refresh: towns traded vs each enemy (24 h / 7 d), our conquests and losses, top BP movers (24 h window), enemy conquests near our towns and the closest enemy towns. Official files only: costs no GrepoData requests |
 | Threat alerts (verified members) | `/alerts on [radius] [min_bp] [scope]` · `/alerts off` · `/alerts status` · `/alerts test` | DMs after the hourly refresh when your town is conquered, or an enemy conquers or founds a town, or gains a lot of attack BP, within `radius` islands of your towns |
 | Op planner (land at T) | `/op create target land [name]` · `/op assign op member town unit [travel] [meteorology] [cartography] [lighthouse] [boost] [transport]` · `/op join op town unit […]` · `/op leave` · `/op show` · `/op list` · `/op cancel` | Each member gets a DM with **their own send time** and a reminder 60 s before. **The bot never sends anything in game: the player clicks Send.** |
+| Soft targets | `/radar soft [around:me\|alliance] [near_town] [radius] [min_points] [max_points] [ocean] [ghosts]` | Ranks towns near your towns (or the alliance's) 0–100 from public data: inactivity, stagnant points, low defence record and no new defence BP, isolation from alliance-mates, no alliance, small town, just conquered, ghost towns. Our side is excluded |
+| Quit prediction | `/quitrisk [player] [alliance] [near_town] [radius] [min_points]` · optional board section via `/warroom options quitters:true` | Score from idle time, points trend, BP trend, towns lost vs taken (7 days) and alliance status, with a confidence % |
+| AI reports (Gemini free tier) | `/report parse [text] [image] [town] [private]` (no input = paste box) · right-click a message → Apps → **Parse report** · `/report search town [kind] [page]` · `/report show id` · `/report delete id` | Gemini reads a pasted report or screenshot into units/losses/buildings/resources; stored per Discord server and searchable by town |
+| Weekly newspaper (admins) | `/newspaper channel channel [day] [hour]` · `/newspaper preview` · `/newspaper post` · `/newspaper status` · `/newspaper off` | Conquests, wars, risers/fallers and our alliance's week, written by Gemini in the server language; template summary without a key |
 | Settings | `/setup world` · `/setup language en\|el` · `/setup show` · `/help` | |
 
 Everything is in English and Greek. Bot replies follow `/setup language`. Command, subcommand, option and choice **names and descriptions** are localized with Discord's `el` locale, so members whose Discord is in Greek see e.g. `/κορυφαίοι σήμερα` or `/πόλη ραντάρ`. A test enforces that every command element has a Greek name and description and that the EN/GR string tables match.
@@ -49,6 +53,18 @@ Intel comes from your **GrepoData account** (the one you use on grepodata.com wi
   - **Estimate:** without `travel:`, the bot estimates from the map (`50 × distance_px / speed + 900 / world speed`, speeds from the world's `units.json` with meteorology/cartography/lighthouse/boost applied; land units on another island travel at the speed of their boats). Town positions inside an island are not public, so this is shown as **≈ ± a few minutes**. Use `travel:` for real ops.
   - The anti-timing rule (±10 s on every command) still applies in game.
 
+## AI features (Gemini, free tier only)
+- **Key.** Create one at https://aistudio.google.com/apikey in a Google project **without billing**. Such a project stays on the free tier and cannot be charged. Put it in `.env` as `GEMINI_API_KEY`. No key: `/report` answers with a clear message and the newspaper uses a template.
+- **Model.** Default `gemini-3.5-flash-lite` (text + images, free tier). `GEMINI_MODEL` accepts only free-tier flash models; pro/paid models are refused and replaced by the default.
+- **Limits.** All AI calls go through one queue capped at `GEMINI_RPM` (default 8/min) and `GEMINI_RPD` (default 400 per Pacific day, counted in the DB), below the free-tier quota. On a 429 the bot waits for Google's retry delay; if the daily quota is gone, AI features pause until midnight Pacific (10:00 Greek time) and say so. One user can parse a report every 20 s. `/newspaper status` shows today's usage.
+- **Privacy.** Only what members paste or attach (and, for the newspaper, public world numbers) is sent to Google. On the free tier Google may use prompts to improve its products, so do not paste anything private. Reports are stored only in this bot's DB, per Discord server.
+- **Accuracy.** The AI can misread numbers, especially on blurry screenshots. Every parsed report says so; pasted text is more reliable than images.
+
+## Soft targets and quit prediction
+- Built only from public data: the hourly official files (players, towns, conquests, kill points), the bot's activity tracking, and a **daily snapshot** of every player and alliance the bot stores itself (kept 40 days).
+- Trends (points, BP, newspaper risers/fallers) compare with the stored day closest to a week ago, so they get useful after the bot has run for a few days and complete after 7. Until then the reply shows fewer signals and a lower confidence.
+- Scores are heuristics, not facts: scout before you attack.
+
 ### Verification: why a town name and not the profile text
 Grepolis profile texts are **not public**. They are not in the official world data files or in GrepoData's public API. The only way to read them is inside the logged-in game client, and a bot logging into the game breaks InnoGames' rules (§2 account usage, §7 bots/automation). Town names **are** public: they appear in the hourly `towns.txt`. So the member renames **one of their own towns** to include a short code (e.g. `02. Sparta GD7KQ2`), and the bot sees it in the next hourly file. The bot only reads public data, and the human makes the in-game change. Codes expire after 48 h. The bot also checks automatically after each towns refresh, sends the member a DM when verified, and the town can be renamed back afterwards.
 
@@ -56,6 +72,7 @@ Roles: `/roles verified` sets a role for every linked member, and `/roles allian
 
 ## ToS compliance (InnoGames)
 - No game login, no session cookies, no game passwords, no internal game (AJAX) API, and no automated in-game actions of any kind.
+- AI (optional, Gemini) only sees what members paste or attach, and public world numbers for the newspaper. It never touches the game.
 - Reads only public data: `https://{world}.grepolis.com/data/*.txt.gz` (with ETag/If-Modified-Since, about 8 small requests per world every 15 min, mostly 304s) and GrepoData's public API.
 - GrepoData politeness:
   - one shared budget (`GREPODATA_RPM`, default 30/min against their ~400/min ban threshold)
@@ -186,6 +203,8 @@ npm run cli -- town-radar gr125 "ZAGAN 14" --radius 40   # or --x 500 --y 500
 npm run cli -- token-status                       # decodes GREPODATA_TOKEN (account, expiry); no network, never prints it
 npm run cli -- intel gr125 town "ZAGAN 14"         # uses GREPODATA_TOKEN from the environment
 npm run smoke                                     # drives the real handlers with fake interactions
+npm run smoke:batch1                              # war room, alerts, op planner (live gr125 data, fake Discord)
+npm run smoke:batch2                              # soft targets, quit risk, reports, newspaper (fake Gemini unless SMOKE_GEMINI=1)
 ```
 The CLI keeps its own DB (`CLI_DB_PATH`, default `./data/cli.sqlite`). Run `refresh` again after the next hourly file update to see real alliance-change and BP diffs. With Docker: `docker compose run --rm cli refresh gr126`.
 
@@ -198,6 +217,8 @@ npm run build       # → compiled/
 
 ## Known limits
 - Official files update about hourly and at staggered times, so feeds are at most ~1 h behind. That is the same for every tool.
+- Soft-target and quit scores need a few days of the bot's own daily history for trends (the footer shows how many days exist).
+- AI report parsing can misread numbers; check before acting. Discord slash options flatten newlines, so long pasted reports work best with the paste box (`/report parse` without options) or a screenshot.
 - Op planner estimates without `travel:` can be several minutes off (town slot positions inside islands are not public). With the in-game travel time they are exact.
 - Threat alerts and boards see what the hourly public files show: conquests, new towns and BP changes. Incoming attacks are not public, so they cannot be detected.
 - Distances use island coordinates. Exact in-game distance also depends on the town's slot inside the island, and those templates are not public.

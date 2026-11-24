@@ -3,7 +3,7 @@
  * English is the default; every command, subcommand, option and choice gets a Greek (el) name and
  * description from ./commandsEl.ts (applied in commandJson, enforced by test/commands.test.ts).
  */
-import { ChannelType, PermissionFlagsBits, SlashCommandBuilder, type SlashCommandStringOption, type SlashCommandIntegerOption, type SlashCommandSubcommandBuilder } from 'discord.js';
+import { ApplicationCommandType, ChannelType, ContextMenuCommandBuilder, PermissionFlagsBits, SlashCommandBuilder, type SlashCommandStringOption, type SlashCommandIntegerOption, type SlashCommandSubcommandBuilder } from 'discord.js';
 import { localizeCommands } from './commandsEl.js';
 
 const worldOpt = (o: SlashCommandStringOption) => o.setName('world').setDescription('World id, e.g. gr125 or en180 (default: server world)').setAutocomplete(true);
@@ -56,7 +56,25 @@ export const commands = [
       .addStringOption((o) => o.setName('near_town').setDescription('Sort by distance from this town').setAutocomplete(true))
       .addIntegerOption((o) => o.setName('radius').setDescription('Max distance from near_town (default 20)').setMinValue(1).setMaxValue(500))
       .addIntegerOption((o) => o.setName('min_points').setDescription('Minimum town points').setMinValue(0))
+      .addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('soft').setDescription('Soft targets near your towns or alliance, ranked 0-100')
+      .addStringOption((o) => o.setName('around').setDescription('Measure distance from (default: your towns if verified, else alliance)')
+        .addChoices({ name: 'my towns', value: 'me' }, { name: 'our alliance', value: 'alliance' }))
+      .addStringOption((o) => o.setName('near_town').setDescription('Or: around this town instead').setAutocomplete(true))
+      .addIntegerOption((o) => o.setName('radius').setDescription('Max distance in islands (default 15)').setMinValue(1).setMaxValue(100))
+      .addIntegerOption((o) => o.setName('min_points').setDescription('Minimum player points').setMinValue(0))
+      .addIntegerOption((o) => o.setName('max_points').setDescription('Maximum player points').setMinValue(0))
+      .addStringOption((o) => o.setName('ocean').setDescription('Ocean(s), e.g. 45 or 45,46'))
+      .addBooleanOption((o) => o.setName('ghosts').setDescription('Include ghost towns (default: yes)'))
       .addStringOption(worldOpt)),
+
+  new SlashCommandBuilder().setName('quitrisk').setDescription('Who is likely to quit or go inactive (public trends)')
+    .addStringOption((o) => o.setName('player').setDescription('One player: detailed breakdown').setAutocomplete(true))
+    .addStringOption((o) => o.setName('alliance').setDescription('Rank the members of this alliance').setAutocomplete(true))
+    .addStringOption((o) => o.setName('near_town').setDescription('Rank players around this town').setAutocomplete(true))
+    .addIntegerOption((o) => o.setName('radius').setDescription('Distance from near_town in islands (default 20)').setMinValue(1).setMaxValue(100))
+    .addIntegerOption((o) => o.setName('min_points').setDescription('Minimum player points').setMinValue(0))
+    .addStringOption(worldOpt),
 
   new SlashCommandBuilder().setName('feed').setDescription('Automatic feeds (admins)')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).setDMPermission(false)
@@ -175,6 +193,9 @@ export const commands = [
       .addStringOption((o) => o.setName('alliance').setDescription('Alliance').setRequired(true).setAutocomplete(true)).addStringOption(worldOpt))
     .addSubcommand((s) => s.setName('enemy').setDescription('Mark an alliance as an enemy')
       .addStringOption((o) => o.setName('alliance').setDescription('Alliance').setRequired(true).setAutocomplete(true)).addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('options').setDescription('Extra board sections: enemy quit watch, soft targets')
+      .addBooleanOption((o) => o.setName('quitters').setDescription('Show enemies likely to quit'))
+      .addBooleanOption((o) => o.setName('soft_targets').setDescription('Show soft targets near us')))
     .addSubcommand((s) => s.setName('unset').setDescription('Remove an alliance from both sides')
       .addStringOption((o) => o.setName('alliance').setDescription('Alliance').setRequired(true).setAutocomplete(true)).addStringOption(worldOpt)),
 
@@ -203,6 +224,49 @@ export const commands = [
     .addSubcommand((s) => s.setName('show').setDescription('Show an op and everyone\'s send times').addIntegerOption(opIdOpt))
     .addSubcommand((s) => s.setName('list').setDescription('Open ops on this server'))
     .addSubcommand((s) => s.setName('cancel').setDescription('Cancel an op (creator or admins)').addIntegerOption(opIdOpt)),
+
+  // ---- AI report parser (Gemini free tier)
+  new SlashCommandBuilder().setName('report').setDescription('Parse and store battle/spy reports (AI), search them by town').setDMPermission(false)
+    .addSubcommand((s) => s.setName('parse').setDescription('Paste a report or attach a screenshot (empty = paste box)')
+      .addStringOption((o) => o.setName('text').setDescription('Report text copied from the game').setMaxLength(6000))
+      .addAttachmentOption((o) => o.setName('image').setDescription('Screenshot of the report'))
+      .addStringOption((o) => o.setName('town').setDescription('Town the report is about (if not detected)').setAutocomplete(true))
+      .addBooleanOption((o) => o.setName('private').setDescription('Only you see the result (still stored for the server)'))
+      .addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('search').setDescription('Stored reports about a town')
+      .addStringOption((o) => o.setName('town').setDescription('Town').setRequired(true).setAutocomplete(true))
+      .addStringOption((o) => o.setName('kind').setDescription('Report type').addChoices(
+        { name: 'attack', value: 'attack' }, { name: 'defense', value: 'defense' }, { name: 'spy', value: 'spy' },
+        { name: 'support', value: 'support' }, { name: 'conquest', value: 'conquest' }, { name: 'other', value: 'other' }))
+      .addIntegerOption(pageOpt).addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('show').setDescription('Show a stored report')
+      .addIntegerOption((o) => o.setName('id').setDescription('Report number').setRequired(true).setMinValue(1)))
+    .addSubcommand((s) => s.setName('delete').setDescription('Delete a stored report (author or admins)')
+      .addIntegerOption((o) => o.setName('id').setDescription('Report number').setRequired(true).setMinValue(1))),
+
+  // ---- Weekly newspaper (Gemini, template fallback)
+  new SlashCommandBuilder().setName('newspaper').setDescription('Weekly world newspaper (admins)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).setDMPermission(false)
+    .addSubcommand((s) => s.setName('channel').setDescription('Post the newspaper every week in this channel')
+      .addChannelOption((o) => o.setName('channel').setDescription('Channel').setRequired(true).addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
+      .addIntegerOption((o) => o.setName('day').setDescription('Day of the week (default Sunday)').addChoices(
+        { name: 'Monday', value: 1 }, { name: 'Tuesday', value: 2 }, { name: 'Wednesday', value: 3 }, { name: 'Thursday', value: 4 },
+        { name: 'Friday', value: 5 }, { name: 'Saturday', value: 6 }, { name: 'Sunday', value: 0 }))
+      .addIntegerOption((o) => o.setName('hour').setDescription('Hour, server time (default 20)').setMinValue(0).setMaxValue(23))
+      .addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('preview').setDescription('Write this week\'s newspaper now (only you see it)').addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('post').setDescription('Post this week\'s newspaper to the channel now'))
+    .addSubcommand((s) => s.setName('status').setDescription('Newspaper schedule and AI usage'))
+    .addSubcommand((s) => s.setName('off').setDescription('Stop the weekly newspaper')),
 ];
 
-export const commandJson = () => localizeCommands(commands.map((c) => c.toJSON()));
+/** Message actions (right-click a message → Apps). Names may contain spaces; localized in commandJson. */
+export const contextCommands = [
+  new ContextMenuCommandBuilder().setName('Parse report').setType(ApplicationCommandType.Message).setDMPermission(false),
+];
+
+export const CONTEXT_EL: Record<string, string> = { 'Parse report': 'Ανάλυση αναφοράς' };
+export const commandJson = () => [
+  ...localizeCommands(commands.map((c) => c.toJSON())),
+  ...contextCommands.map((c) => { const j = c.toJSON(); return { ...j, name_localizations: { el: CONTEXT_EL[j.name] ?? j.name } }; }),
+];

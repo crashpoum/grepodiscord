@@ -27,5 +27,13 @@ export const config = {
   grepodataGuildId: env.GREPODATA_GUILD_ID ?? env.DEV_GUILD_ID ?? '',
   /** Discord user to alert about token expiry for env tokens (default: guild owner). */
   grepodataAdminId: env.GREPODATA_ADMIN_ID ?? '',
+  /**
+   * Gemini (free tier only) for /report and the weekly newspaper. Without a key those features reply with a
+   * clear message (the newspaper falls back to a template). Caps stay below the free-tier quota.
+   */
+  geminiApiKey: env.GEMINI_API_KEY ?? '',
+  geminiModel: env.GEMINI_MODEL ?? '',
+  geminiRpm: num(env.GEMINI_RPM, 8),
+  geminiRpd: num(env.GEMINI_RPD, 400),
   logLevel: env.LOG_LEVEL ?? 'info',
 };

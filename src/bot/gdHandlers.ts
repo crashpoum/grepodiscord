@@ -9,13 +9,14 @@ import type { RankSort, TopKind } from '../gdViews.js';
 import { t, type Lang } from '../i18n.js';
 import type { Ctx } from '../services.js';
 import { discordTs } from '../time.js';
+import { safeEmbed } from './errors.js';
 
 const COLOR_OK = 0x57f287;
 const COLOR_ERR = 0xed4245;
 const PRIVATE = { flags: MessageFlags.Ephemeral } as const;
 
 async function show(i: ChatInputCommandInteraction, embed: APIEmbed) {
-  await i.editReply({ embeds: [embed] });
+  await i.editReply({ embeds: [safeEmbed(embed)] });
 }
 
 /** Public GrepoData lookups (deferred, public reply). */

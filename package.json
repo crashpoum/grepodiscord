@@ -1,6 +1,6 @@
 {
   "name": "grepocord",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Grepolis Discord bot (v1): lookups, feeds, radar, verification",
   "main": "compiled/index.js",
   "scripts": {
@@ -12,7 +12,8 @@
     "cli": "node --disable-warning=ExperimentalWarning compiled/cli.js",
     "dev": "tsx src/index.ts",
     "cli:dev": "tsx src/cli.ts",
-    "smoke": "tsx scripts/smoke-handlers.ts"
+    "smoke": "tsx scripts/smoke-handlers.ts",
+    "smoke:batch1": "tsx scripts/smoke-batch1.ts"
   },
   "license": "MIT",
   "type": "module",

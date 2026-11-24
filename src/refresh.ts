@@ -1,7 +1,7 @@
 /** Keeps world snapshots fresh and produces feed events after each data refresh. */
 import { fetchWorldFiles, type FileStore } from './data/official.js';
 import { buildSnapshot, WORLD_FILE_NAMES, type WorldFiles, type WorldSnapshot } from './data/snapshot.js';
-import { parseConquers, parseKills, parsePlayers, killsMap } from './data/parse.js';
+import { parseConquers, parseKills, parsePlayers, parseTowns, killsMap, type Town } from './data/parse.js';
 import { allianceChanges, bpDeltas, maxConquestTime, newConquests, updateActivity, type Activity, type AllianceChange, type BpDelta } from './diff.js';
 import type { Conquest } from './data/parse.js';
 import { log } from './log.js';
@@ -21,6 +21,8 @@ export interface RefreshEvents {
   conquests: Conquest[];
   allianceChanges: AllianceChange[];
   bp: BpDelta[];
+  /** Towns that did not exist in the previous towns file (new colonies). Empty without a previous version. */
+  founded: Town[];
   changedFiles: string[];
   firstLoad: boolean;
 }
@@ -103,10 +105,17 @@ export function computeEvents(world: string, changed: Set<string>, previous: Par
   if (changed.has('player_kills_def') && previous.player_kills_def !== undefined) bp.push(...bpDeltas(killsMap(parseKills(previous.player_kills_def)), snapshot.playerDbp, 'def'));
   bp.sort((a, b) => b.delta - a.delta);
 
+  // Newly founded towns (new ids in towns.txt; conquered towns keep their id).
+  const founded: Town[] = [];
+  if (changed.has('towns') && previous.towns !== undefined) {
+    const prevIds = new Set(parseTowns(previous.towns).map((x) => x.id));
+    for (const x of snapshot.towns.values()) if (!prevIds.has(x.id) && x.playerId !== null) founded.push(x);
+  }
+
   // Activity tracking (for the inactive radar).
   if (changed.size > 0 || store.getActivity(world).size === 0) {
     const act = updateActivity(store.getActivity(world), snapshot.players, snapshot.playerAbp, snapshot.playerDbp, now);
     store.replaceActivity(world, act);
   }
-  return { world, snapshot, conquests, allianceChanges: ac, bp, changedFiles: [...changed], firstLoad };
+  return { world, snapshot, conquests, allianceChanges: ac, bp, founded, changedFiles: [...changed], firstLoad };
 }

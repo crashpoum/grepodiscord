@@ -101,7 +101,7 @@ describe('computeEvents', () => {
   it('caps conquest embeds per refresh and batches by 10', () => {
     const many = Array.from({ length: 45 }, (_, k) => `${100 + (k % 2)},${5000 + k},1,3,10,20,600`).join('\n');
     const sn = buildSnapshot('en999', files({ conquers: many }));
-    const ev = { world: 'en999', snapshot: sn, conquests: sn.conquers, allianceChanges: [], bp: [], changedFiles: [], firstLoad: false };
+    const ev = { world: 'en999', snapshot: sn, conquests: sn.conquers, allianceChanges: [], bp: [], founded: [], changedFiles: [], firstLoad: false };
     const [post] = planFeedPosts([{ id: 1, guildId: 'g', channelId: 'c', world: 'en999', type: 'conquests', filter: {} }], ev, () => 'en');
     expect(post.embeds).toHaveLength(MAX_CONQUESTS_PER_REFRESH + 1);
     expect(batchEmbeds(post.embeds).map((b) => b.length)).toEqual([10, 10, 10, 1]);

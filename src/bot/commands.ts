@@ -3,13 +3,26 @@
  * English is the default; every command, subcommand, option and choice gets a Greek (el) name and
  * description from ./commandsEl.ts (applied in commandJson, enforced by test/commands.test.ts).
  */
-import { ChannelType, PermissionFlagsBits, SlashCommandBuilder, type SlashCommandStringOption, type SlashCommandIntegerOption } from 'discord.js';
+import { ChannelType, PermissionFlagsBits, SlashCommandBuilder, type SlashCommandStringOption, type SlashCommandIntegerOption, type SlashCommandSubcommandBuilder } from 'discord.js';
 import { localizeCommands } from './commandsEl.js';
 
 const worldOpt = (o: SlashCommandStringOption) => o.setName('world').setDescription('World id, e.g. gr125 or en180 (default: server world)').setAutocomplete(true);
 const pageOpt = (o: SlashCommandIntegerOption) => o.setName('page').setDescription('Page (default 1)').setMinValue(1).setMaxValue(50);
 const kindOpt = (o: SlashCommandStringOption) => o.setName('kind').setDescription('Players or alliances (default: players)')
   .addChoices({ name: 'players', value: 'player' }, { name: 'alliances', value: 'alliance' });
+
+const opIdOpt = (o: SlashCommandIntegerOption) => o.setName('op').setDescription('Op number').setRequired(true).setMinValue(1).setAutocomplete(true);
+/** Shared options for /op assign and /op join: origin town, unit, optional in-game travel time and speed modifiers. */
+const opSendOpts = (s: SlashCommandSubcommandBuilder) => s // call AFTER the subcommand's own required options
+  .addStringOption((o) => o.setName('town').setDescription('Town you send from').setRequired(true).setAutocomplete(true))
+  .addStringOption((o) => o.setName('unit').setDescription('Slowest unit in the attack').setRequired(true).setAutocomplete(true))
+  .addStringOption((o) => o.setName('travel').setDescription('Travel time shown in the game, e.g. 1:23:45 (exact send time)').setMaxLength(20))
+  .addBooleanOption((o) => o.setName('meteorology').setDescription('Meteorology researched (+10% land units)'))
+  .addBooleanOption((o) => o.setName('cartography').setDescription('Cartography researched (+10% ships)'))
+  .addBooleanOption((o) => o.setName('lighthouse').setDescription('Lighthouse built (+15% ships)'))
+  .addIntegerOption((o) => o.setName('boost').setDescription('Other speed bonus in % (hero, spell, movement boost)').setMinValue(0).setMaxValue(200))
+  .addStringOption((o) => o.setName('transport').setDescription('Boats for land units (default: transport boat)')
+    .addChoices({ name: 'transport boat', value: 'big_transporter' }, { name: 'fast transport ship', value: 'small_transporter' }));
 
 export const commands = [
   new SlashCommandBuilder().setName('help').setDescription('Show what this bot can do'),
@@ -148,6 +161,48 @@ export const commands = [
     .addSubcommand((s) => s.setName('channel').setDescription('Channel where intel is shown publicly (empty: private everywhere)')
       .addChannelOption((o) => o.setName('channel').setDescription('Channel (leave empty to make intel private everywhere)').addChannelTypes(ChannelType.GuildText, ChannelType.PrivateThread, ChannelType.PublicThread)))
     .addSubcommand((s) => s.setName('clear').setDescription('Remove the GrepoData token from this server')),
+
+  // ---- War room (Components V2 board that edits itself after each world-data refresh)
+  new SlashCommandBuilder().setName('warroom').setDescription('Auto-updating war-room board (admins)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).setDMPermission(false)
+    .addSubcommand((s) => s.setName('place').setDescription('Post a war-room board that updates itself every hour')
+      .addChannelOption((o) => o.setName('channel').setDescription('Channel (default: this one)').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.PublicThread))
+      .addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('remove').setDescription('Remove a board').addIntegerOption((o) => o.setName('id').setDescription('Board number').setRequired(true).setMinValue(1)))
+    .addSubcommand((s) => s.setName('list').setDescription('Boards and war sides').addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('refresh').setDescription('Update all boards of this server now'))
+    .addSubcommand((s) => s.setName('ally').setDescription('Mark an alliance as our side')
+      .addStringOption((o) => o.setName('alliance').setDescription('Alliance').setRequired(true).setAutocomplete(true)).addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('enemy').setDescription('Mark an alliance as an enemy')
+      .addStringOption((o) => o.setName('alliance').setDescription('Alliance').setRequired(true).setAutocomplete(true)).addStringOption(worldOpt))
+    .addSubcommand((s) => s.setName('unset').setDescription('Remove an alliance from both sides')
+      .addStringOption((o) => o.setName('alliance').setDescription('Alliance').setRequired(true).setAutocomplete(true)).addStringOption(worldOpt)),
+
+  // ---- Personal town-threat alerts (verified members, DMs)
+  new SlashCommandBuilder().setName('alerts').setDescription('DM alerts when enemies act near your towns').setDMPermission(false)
+    .addSubcommand((s) => s.setName('on').setDescription('Turn threat alerts on (or change settings)')
+      .addIntegerOption((o) => o.setName('radius').setDescription('Distance from your towns in islands (default 10)').setMinValue(1).setMaxValue(50))
+      .addIntegerOption((o) => o.setName('min_bp').setDescription('Attack-BP gain per hour that counts as a threat (default 3000)').setMinValue(100))
+      .addStringOption((o) => o.setName('scope').setDescription('Whom to watch (default: enemy alliances)')
+        .addChoices({ name: 'enemy alliances', value: 'enemies' }, { name: 'everyone outside our side', value: 'all' })))
+    .addSubcommand((s) => s.setName('off').setDescription('Turn threat alerts off'))
+    .addSubcommand((s) => s.setName('status').setDescription('Show your alert settings'))
+    .addSubcommand((s) => s.setName('test').setDescription('Preview what the last 24 hours would have sent you')),
+
+  // ---- Land-at-T op planner (the bot only tells players when to click Send)
+  new SlashCommandBuilder().setName('op').setDescription('Plan a timed op: everyone gets their own send time').setDMPermission(false)
+    .addSubcommand((s) => s.setName('create').setDescription('Create an op: target town and landing time (server time)')
+      .addStringOption((o) => o.setName('target').setDescription('Target town').setRequired(true).setAutocomplete(true))
+      .addStringOption((o) => o.setName('land').setDescription('Landing time, server time: 2026-11-25 21:30:00, 25/11 21:30 or 21:30:00').setRequired(true).setMaxLength(40))
+      .addStringOption((o) => o.setName('name').setDescription('Op name').setMaxLength(60))
+      .addStringOption(worldOpt))
+    .addSubcommand((s) => opSendOpts(s.setName('assign').setDescription('Assign a member: they get a DM with their send time')
+      .addIntegerOption(opIdOpt).addUserOption((o) => o.setName('member').setDescription('Member').setRequired(true))))
+    .addSubcommand((s) => opSendOpts(s.setName('join').setDescription('Join an op yourself and get your send time').addIntegerOption(opIdOpt)))
+    .addSubcommand((s) => s.setName('leave').setDescription('Leave an op').addIntegerOption(opIdOpt))
+    .addSubcommand((s) => s.setName('show').setDescription('Show an op and everyone\'s send times').addIntegerOption(opIdOpt))
+    .addSubcommand((s) => s.setName('list').setDescription('Open ops on this server'))
+    .addSubcommand((s) => s.setName('cancel').setDescription('Cancel an op (creator or admins)').addIntegerOption(opIdOpt)),
 ];
 
 export const commandJson = () => localizeCommands(commands.map((c) => c.toJSON()));

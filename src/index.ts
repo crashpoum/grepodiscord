@@ -8,6 +8,7 @@ import { WorldManager } from './refresh.js';
 import { GrepoDataClient } from './data/grepodata.js';
 import { handleAutocomplete, handleCommand } from './bot/handlers.js';
 import { startScheduler } from './bot/scheduler.js';
+import { handleButton } from './bot/warPoster.js';
 import { seedEnvToken } from './gdAuth.js';
 
 if (!config.discordToken) {
@@ -35,6 +36,7 @@ client.once(Events.ClientReady, (c) => {
 client.on(Events.InteractionCreate, (i) => {
   if (i.isAutocomplete()) void handleAutocomplete(ctx, i);
   else if (i.isChatInputCommand()) void handleCommand(ctx, i);
+  else if (i.isButton()) void handleButton(ctx, i);
 });
 
 client.on(Events.Error, (e) => log.error('discord client error', e));

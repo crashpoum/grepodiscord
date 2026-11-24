@@ -20,11 +20,22 @@ const PAGE = 15;
 export class UserError extends Error {
   constructor(public key: Parameters<typeof t>[1], public vars: Record<string, string | number> = {}) { super(key); }
 }
-const gdFail = (e: unknown): never => {
+/** Map a failed GrepoData call to a specific user message (logged with the real cause). */
+export const gdFail = (e: unknown): never => {
   if (e instanceof UserError) throw e;
   log.warn(`GrepoData call failed: ${e instanceof Error ? e.message : e}`);
+  if (e instanceof GrepoDataError && (e.status === 429 || e.status === 503)) throw new UserError('gd.rateLimited');
+  if (e instanceof GrepoDataError && e.status === 404) throw new UserError('gd.notFound');
+  if (e instanceof GrepoDataError && (e.status === 401 || e.status === 403)) throw new UserError('gd.auth');
   throw new UserError('gd.unavailable');
 };
+/** Render a view; a GrepoData answer with an unexpected shape becomes a clear message instead of a crash. */
+function render<T>(what: string, fn: () => T): T {
+  try { return fn(); } catch (e) {
+    log.warn(`GrepoData ${what}: could not render answer: ${e instanceof Error ? e.stack ?? e.message : e}`);
+    throw new UserError('intel.badData');
+  }
+}
 const pageFrom = (page?: number | null) => Math.max(0, ((page ?? 1) - 1) * PAGE);
 
 export async function topScoreboard(ctx: Ctx, world: string, kind: TopKind, yesterday: boolean, lang: Lang): Promise<APIEmbed> {
@@ -157,21 +168,40 @@ export interface IntelResult { embed: APIEmbed; ephemeral: boolean }
  * Run an intel call with the token of THIS guild only. On 401 the token is renewed once if a refresh token
  * exists; otherwise intel is paused for the guild (no retries: GrepoData bans IPs that produce many 401s).
  */
-async function withGuildToken<T>(ctx: Ctx, guildId: string, channelId: string, fn: (token: string) => Promise<T>): Promise<{ value: T | null; ephemeral: boolean }> {
-  const row = ctx.store.getGdToken(guildId);
-  const acc = intelAccess(row, channelId, Date.now());
-  if (!acc.ok) throw new UserError(acc.reason === 'no-token' ? 'intel.noToken' : 'intel.expired');
+export async function withGuildToken<T>(ctx: Ctx, guildId: string, channelId: string, rawFn: (token: string) => Promise<T>): Promise<{ value: T | null; ephemeral: boolean }> {
+  // GrepoData sometimes answers 200 with {success:false, message}: treat like the matching HTTP error.
+  const fn = async (tok: string): Promise<T> => {
+    const v = await rawFn(tok);
+    const f = v as { success?: unknown; message?: unknown } | null;
+    if (f && typeof f === 'object' && f.success === false) throw new GrepoDataError(`success=false: ${String(f.message ?? '')}`, /token/i.test(String(f.message ?? '')) ? 401 : 404);
+    return v;
+  };
+  let row = ctx.store.getGdToken(guildId);
+  let acc = intelAccess(row, channelId, Date.now());
+  if (!acc.ok && acc.reason === 'expired' && row?.refreshToken && row.alertStage !== ALERT.refreshFailed) {
+    // Expired but renewable (e.g. the bot was offline): renew once right now instead of failing.
+    log.info(`intel: token for guild ${guildId} expired, renewing before the lookup`);
+    if ((await renewToken(ctx.store, ctx.gd, row, 'refresh')) === 'refreshed') { row = ctx.store.getGdToken(guildId); acc = intelAccess(row, channelId, Date.now()); }
+  }
+  if (!acc.ok) {
+    log.warn(`intel for guild ${guildId} refused: ${acc.reason}${row?.lastError ? ` (last error: ${row.lastError})` : ''}`);
+    if (acc.reason === 'no-token') throw new UserError('intel.noToken');
+    if (row?.alertStage === ALERT.refreshFailed) throw new UserError('intel.refreshFailed', { error: row.lastError ?? '?' });
+    throw new UserError('intel.expired');
+  }
   if (row && row.alertStage === ALERT.refreshFailed && row.lastError === 'HTTP 401') throw new UserError('intel.rejected');
   try {
     return { value: await fn(acc.token), ephemeral: acc.ephemeral };
   } catch (e) {
     if (!(e instanceof GrepoDataError)) return gdFail(e);
+    log.warn(`intel call for guild ${guildId} failed: ${e.message}`);
     if (e.status === 404) return { value: null, ephemeral: acc.ephemeral };
     if (e.status === 401 || e.status === 403) {
       if (row?.refreshToken && (await renewToken(ctx.store, ctx.gd, row, 'refresh')) === 'refreshed') {
         const fresh = ctx.store.getGdToken(guildId)!;
         try { return { value: await fn(fresh.accessToken), ephemeral: acc.ephemeral }; } catch (e2) {
           if (e2 instanceof GrepoDataError && e2.status === 404) return { value: null, ephemeral: acc.ephemeral };
+          log.warn(`intel retry for guild ${guildId} failed: ${e2 instanceof Error ? e2.message : e2}`);
         }
       }
       ctx.store.setGdAlert(guildId, ALERT.refreshFailed, 'HTTP 401');
@@ -185,13 +215,15 @@ export async function intelTown(ctx: Ctx, guildId: string, channelId: string, wo
   const x = await snapTown(ctx, world, q);
   const r = await withGuildToken(ctx, guildId, channelId, (tok) => ctx.gd.intelTown(tok, guildId, world, x.id));
   if (!r.value) return { embed: { description: t(lang, 'intel.notFound', { name: x.name }), color: 0x6c3483 }, ephemeral: r.ephemeral };
-  return { embed: townIntelEmbed(lang, world, x.id, { ...r.value, name: r.value.name || x.name }), ephemeral: r.ephemeral };
+  const v = r.value;
+  return { embed: render('intel town', () => townIntelEmbed(lang, world, x.id, { ...v, name: v.name || x.name })), ephemeral: r.ephemeral };
 }
 
 export async function intelBrowse(ctx: Ctx, guildId: string, channelId: string, world: string, scope: 'player' | 'alliance', q: string, lang: Lang): Promise<IntelResult> {
   const subj = scope === 'player' ? await snapPlayer(ctx, world, q) : await snapAlliance(ctx, world, q);
   const r = await withGuildToken(ctx, guildId, channelId, (tok) => (scope === 'player' ? ctx.gd.intelPlayer(tok, guildId, world, subj.id) : ctx.gd.intelAlliance(tok, guildId, world, subj.id)));
   if (!r.value) return { embed: { description: t(lang, 'intel.notFound', { name: subj.name }), color: 0x6c3483 }, ephemeral: r.ephemeral };
-  return { embed: browseIntelEmbed(lang, world, scope, subj, r.value), ephemeral: r.ephemeral };
+  const v = r.value;
+  return { embed: render(`intel ${scope}`, () => browseIntelEmbed(lang, world, scope, subj, v)), ephemeral: r.ephemeral };
 }
 

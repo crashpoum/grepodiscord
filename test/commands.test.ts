@@ -38,6 +38,14 @@ describe('slash commands: Greek localization', () => {
     expect(missing).toEqual([]);
   });
 
+  it('required options come before optional ones (Discord rejects the command otherwise)', () => {
+    for (const [n, path] of walk(cmds)) {
+      const opts = (n.options ?? []).filter((o) => o.type !== 1 && o.type !== 2) as (Node & { required?: boolean })[];
+      const firstOptional = opts.findIndex((o) => !o.required);
+      if (firstOptional >= 0) expect(opts.slice(firstOptional).some((o) => o.required), [...path, n.name].join('/')).toBe(false);
+    }
+  });
+
   it('names are unique per level in both languages', () => {
     const levels: Node[][] = [cmds];
     for (const [n] of walk(cmds)) if (n.options) levels.push(n.options);

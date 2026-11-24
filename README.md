@@ -18,6 +18,9 @@ MIT licensed. TypeScript, discord.js v14, SQLite via Node's built-in `node:sqlit
 | Towns | `/town search query` · `/town info town` · `/town radar [town] [x y] [radius] [ghosts_only]` | GrepoData town search, town details and radar (falls back to the official files if GrepoData is down) |
 | Intel (City Indexer) | `/intel town\|player\|alliance` | GrepoData City Indexer with **this server's** GrepoData token (see [Intel](#intel-grepodata-city-indexer)) |
 | GrepoData account (admins) | `/grepodata token access_token [refresh_token]` · `/grepodata status` · `/grepodata channel [channel]` · `/grepodata clear` | Replies are always private |
+| War room (admins) | `/warroom place [channel]` · `/warroom remove id` · `/warroom list` · `/warroom refresh` · `/warroom ally alliance` · `/warroom enemy alliance` · `/warroom unset alliance` | A Components V2 board that **edits itself** after every hourly refresh: towns traded vs each enemy (24 h / 7 d), our conquests and losses, top BP movers (24 h window), enemy conquests near our towns and the closest enemy towns. Official files only: costs no GrepoData requests |
+| Threat alerts (verified members) | `/alerts on [radius] [min_bp] [scope]` · `/alerts off` · `/alerts status` · `/alerts test` | DMs after the hourly refresh when your town is conquered, or an enemy conquers or founds a town, or gains a lot of attack BP, within `radius` islands of your towns |
+| Op planner (land at T) | `/op create target land [name]` · `/op assign op member town unit [travel] [meteorology] [cartography] [lighthouse] [boost] [transport]` · `/op join op town unit […]` · `/op leave` · `/op show` · `/op list` · `/op cancel` | Each member gets a DM with **their own send time** and a reminder 60 s before. **The bot never sends anything in game: the player clicks Send.** |
 | Settings | `/setup world` · `/setup language en\|el` · `/setup show` · `/help` | |
 
 Everything is in English and Greek. Bot replies follow `/setup language`. Command, subcommand, option and choice **names and descriptions** are localized with Discord's `el` locale, so members whose Discord is in Greek see e.g. `/κορυφαίοι σήμερα` or `/πόλη ραντάρ`. A test enforces that every command element has a Greek name and description and that the EN/GR string tables match.
@@ -36,6 +39,15 @@ Intel comes from your **GrepoData account** (the one you use on grepodata.com wi
   - **If renewal is rejected:** the bot stops trying (GrepoData bans IPs that cause many 401s), pauses intel and DMs the admin.
   - **Optional fallback:** `GREPODATA_LOGIN` / `GREPODATA_PASSWORD` let the bot log in again with `POST /auth/login`. This only works for the server in `GREPODATA_GUILD_ID`. It is not needed if you give a refresh token.
 - **Token from `.env`.** Instead of the command you can set `GREPODATA_TOKEN` (and preferably `GREPODATA_REFRESH_TOKEN`). These are bound to **one** server: `GREPODATA_GUILD_ID`, or `DEV_GUILD_ID` if that is empty. A newer token set with `/grepodata token`, or a renewed one, takes precedence. The `.env` value is only applied again when you change it to a newer token.
+
+## War room, threat alerts and the op planner
+- **Sides.** `/warroom ally` and `/warroom enemy` set our side and the enemies per world. Left empty, they are automatic: our side is the alliances of verified members, and enemies are the (up to 5) alliances that took the most towns from us in the last 7 days. Boards and threat alerts both use these sides.
+- **Boards** are one message each, edited in place after every world-data refresh (and with the 🔄 button, at most once a minute). If someone deletes the message, the bot posts a new one. The bot needs View Channel and Send Messages in that channel.
+- **Threat alerts** are opt-in per member and need `/verify`. `scope:enemies` (default) watches the enemy list, or everyone outside our side if no enemies are set; `scope:all` always watches everyone outside our side. `/alerts test` previews the last 24 h.
+- **Op planner.** The landing time is entered in **server (world) time**, the clock the game shows (gr worlds: Europe/Athens): `2026-11-25 21:30:00`, `25/11 21:30` or `21:30:00`. Every reply also shows Discord timestamps, so readers see their own local time.
+  - **Exact:** give `travel:` = the travel time the game shows in the attack window (it already includes your bonuses). The send time is then exactly landing − travel.
+  - **Estimate:** without `travel:`, the bot estimates from the map (`50 × distance_px / speed + 900 / world speed`, speeds from the world's `units.json` with meteorology/cartography/lighthouse/boost applied; land units on another island travel at the speed of their boats). Town positions inside an island are not public, so this is shown as **≈ ± a few minutes**. Use `travel:` for real ops.
+  - The anti-timing rule (±10 s on every command) still applies in game.
 
 ### Verification: why a town name and not the profile text
 Grepolis profile texts are **not public**. They are not in the official world data files or in GrepoData's public API. The only way to read them is inside the logged-in game client, and a bot logging into the game breaks InnoGames' rules (§2 account usage, §7 bots/automation). Town names **are** public: they appear in the hourly `towns.txt`. So the member renames **one of their own towns** to include a short code (e.g. `02. Sparta GD7KQ2`), and the bot sees it in the next hourly file. The bot only reads public data, and the human makes the in-game change. Codes expire after 48 h. The bot also checks automatically after each towns refresh, sends the member a DM when verified, and the town can be renamed back afterwards.
@@ -127,7 +139,7 @@ Run these in the folder that holds `docker-compose.yml`, `.env` and `data/`:
 docker compose down                     # stop the OLD container (grepodiscord) while the old compose file is still checked out
 git pull
 docker compose build
-docker compose run --rm register        # re-register: new commands + Greek command names
+docker compose run --rm register        # re-register: new commands + Greek command names (needed after every update that adds commands)
 docker compose up -d
 docker compose logs -f bot              # expect "Migrated database /app/data/grepodiscord.sqlite -> /app/data/grepocord.sqlite" once
 ```
@@ -186,6 +198,8 @@ npm run build       # → compiled/
 
 ## Known limits
 - Official files update about hourly and at staggered times, so feeds are at most ~1 h behind. That is the same for every tool.
+- Op planner estimates without `travel:` can be several minutes off (town slot positions inside islands are not public). With the in-game travel time they are exact.
+- Threat alerts and boards see what the hourly public files show: conquests, new towns and BP changes. Incoming attacks are not public, so they cannot be detected.
 - Distances use island coordinates. Exact in-game distance also depends on the town's slot inside the island, and those templates are not public.
 - The inactive radar needs N hours of our own tracking. Before that it asks GrepoData for up to 10 candidates per query.
 - GrepoData's public API is undocumented and could change. Lookups fall back to official data (without charts) if it fails.

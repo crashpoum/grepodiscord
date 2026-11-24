@@ -11,7 +11,8 @@ import { generateCode } from '../verify.js';
 import { allianceCard, checkVerification, playerCard, radarGhosts, radarInactive, resolveAlliance, resolvePlayer, type Ctx } from '../services.js';
 import { syncGuildRoles } from './poster.js';
 import { gdAdmin, gdIntel, gdPublic } from './gdHandlers.js';
-import { UserError } from '../gdServices.js';
+import { classifyError, logError, safeEmbed } from './errors.js';
+import { handleOp, handleAlerts, handleWarroom, opAutocomplete } from './opsHandlers.js';
 
 const COLOR_OK = 0x57f287;
 const COLOR_ERR = 0xed4245;
@@ -33,6 +34,7 @@ export async function handleAutocomplete(ctx: Ctx, i: AutocompleteInteraction) {
   try {
     const focused = i.options.getFocused(true);
     const q = String(focused.value ?? '');
+    if (focused.name === 'op' || focused.name === 'unit') return void (await opAutocomplete(ctx, i, focused.name, q));
     if (focused.name === 'world') {
       const servers = await Promise.race([ctx.gd.activeWorlds(config.markets), new Promise<never>((_, r) => setTimeout(() => r(new Error('timeout')), 2000))]);
       const worlds = servers.flatMap((s) => s.worlds.map((w) => ({ name: `${w.id}${w.name !== w.id ? ` · ${w.name}` : ''}`, value: w.id })));
@@ -46,7 +48,7 @@ export async function handleAutocomplete(ctx: Ctx, i: AutocompleteInteraction) {
     const cmd = i.commandName;
     let choices: { name: string; value: string }[] = [];
     const isAlliance = focused.name === 'alliance' || (cmd === 'alliance' && focused.name === 'name');
-    const isTown = focused.name === 'near_town' || focused.name === 'town';
+    const isTown = focused.name === 'near_town' || focused.name === 'town' || focused.name === 'target';
     if (isAlliance) {
       choices = searchByName(snap.alliances.values(), q, 25, (a) => a.points).map((a) => ({ name: `${a.name} · ${fmt(a.points, 'en')} pts · ${a.members} m.`, value: `id:${a.id}` }));
     } else if (isTown) {
@@ -74,6 +76,9 @@ export async function handleCommand(ctx: Ctx, i: ChatInputCommandInteraction) {
       case 'verify': return await verify(ctx, i, lang);
       case 'roles': return await roles(ctx, i, lang);
       case 'grepodata': return await gdAdmin(ctx, i, lang);
+      case 'warroom': return await handleWarroom(ctx, i, lang);
+      case 'alerts': return await handleAlerts(ctx, i, lang);
+      case 'op': return await handleOp(ctx, i, lang);
       case 'top': case 'wars': case 'changes': case 'conquests': case 'town': case 'intel': {
         const world = await requireWorld(ctx, i, lang);
         if (!world) return;
@@ -81,9 +86,9 @@ export async function handleCommand(ctx: Ctx, i: ChatInputCommandInteraction) {
       }
     }
   } catch (e) {
-    const known = e instanceof UserError;
-    if (!known) log.error(`command /${i.commandName} failed`, e);
-    const payload = { embeds: [msg(known ? t(lang, e.key, e.vars) : t(lang, 'err.generic'), COLOR_ERR)] };
+    const c = classifyError(e);
+    logError(`command /${i.commandName}${i.options.getSubcommand(false) ? ` ${i.options.getSubcommand(false)}` : ''}`, e, c);
+    const payload = { embeds: [msg(t(lang, c.key, c.vars), COLOR_ERR)] };
     if (i.deferred || i.replied) await i.editReply(payload).catch(() => undefined);
     else await i.reply({ ...payload, flags: MessageFlags.Ephemeral }).catch(() => undefined);
   }
@@ -97,8 +102,8 @@ async function requireWorld(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang
 }
 
 async function reply(i: ChatInputCommandInteraction, embed: APIEmbed, ephemeral = false) {
-  if (i.deferred || i.replied) return void (await i.editReply({ embeds: [embed] }));
-  await i.reply({ embeds: [embed], ...(ephemeral ? { flags: MessageFlags.Ephemeral } : {}) });
+  if (i.deferred || i.replied) return void (await i.editReply({ embeds: [safeEmbed(embed)] }));
+  await i.reply({ embeds: [safeEmbed(embed)], ...(ephemeral ? { flags: MessageFlags.Ephemeral } : {}) });
 }
 
 async function setup(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {

@@ -41,6 +41,6 @@ const ctx = { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fakeGd)
 const app = createWebApp({ ctx, guilds: { has: () => true, name: () => 'Smoke server' }, secret: 's'.repeat(32) });
 http.createServer(app.handler).listen(PORT, () => {
   const tok = issueSession('s'.repeat(32), { u: 'U1', g: 'G1', n: 'Smoke' });
-  console.log(`LIVE http://localhost:${PORT}/live#s=${tok}`);
-  console.log(`MAP  http://localhost:${PORT}/map#s=${tok}`);
+  console.log(`LIVE http://localhost:${PORT}/go/live?t=${tok}`);
+  console.log(`MAP  http://localhost:${PORT}/go/map?t=${tok}`);
 });

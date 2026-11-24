@@ -21,11 +21,12 @@ let session: string | null = null;
 const inActivity = new URLSearchParams(location.search).has('frame_id');
 let tab: 'live' | 'map' = location.pathname.startsWith('/map') ? 'map' : 'live';
 
-class AuthError extends Error {}
+class AuthError extends Error { constructor(msg: string, public reason = 'expired') { super(msg); } }
 async function api<T>(path: string): Promise<T> {
-  const res = await fetch(path, { headers: session ? { Authorization: `Bearer ${session}` } : {} });
-  const body = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (res.status === 401) throw new AuthError(body.error || L('expired'));
+  // Activity: Bearer token. Browser: the HttpOnly session cookie set by /go/<tab> or the Discord login (sent automatically).
+  const res = await fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: session ? { Authorization: `Bearer ${session}` } : {} });
+  const body = (await res.json().catch(() => ({}))) as T & { error?: string; reason?: string };
+  if (res.status === 401) throw new AuthError(body.error || L('expired'), body.reason);
   if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
   return body;
 }
@@ -51,6 +52,7 @@ async function activityAuth(): Promise<void> {
   session = body.session;
 }
 
+/** Legacy links carried the token in the #fragment; current links use /go/<tab>?t= and a cookie. */
 function browserAuth() {
   const m = /(?:^#|&)s=([^&]+)/.exec(location.hash);
   if (m) {
@@ -60,6 +62,7 @@ function browserAuth() {
   } else {
     try { session = sessionStorage.getItem(SKEY); } catch { session = null; }
   }
+  if (location.hash) history.replaceState(null, '', location.pathname);
 }
 
 // ---------------------------------------------------------------- shell
@@ -78,7 +81,7 @@ function renderShell() {
     <span class="meta">${esc(me.guild ?? '')} · ${esc(me.world ?? '-')}${me.user ? ` · ${esc(me.user)}` : ''}${inActivity ? '' : ` · <a href="#" id="logout">${esc(L('logout'))}</a>`}</span>
   </header><main id="view"></main></div>`;
   app.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab as 'live' | 'map')));
-  document.getElementById('logout')?.addEventListener('click', (e) => { e.preventDefault(); try { sessionStorage.removeItem(SKEY); } catch { /* */ } session = null; loginScreen(L('needLogin')); });
+  document.getElementById('logout')?.addEventListener('click', (e) => { e.preventDefault(); try { sessionStorage.removeItem(SKEY); } catch { /* */ } session = null; location.href = '/logout'; });
 }
 
 function switchTab(t: 'live' | 'map') {
@@ -90,7 +93,10 @@ function switchTab(t: 'live' | 'map') {
 }
 
 function fail(e: unknown) {
-  if (e instanceof AuthError) { try { sessionStorage.removeItem(SKEY); } catch { /* */ } return loginScreen(e.message); }
+  if (e instanceof AuthError) {
+    try { sessionStorage.removeItem(SKEY); } catch { /* */ }
+    return loginScreen(e.reason === 'none' ? L('needLogin') : e.message);
+  }
   const v = document.getElementById('view');
   const html = `<div class="err">${esc(L('error', { msg: e instanceof Error ? e.message : String(e) }))} <button class="btn small" id="retry">${esc(L('retry'))}</button></div>`;
   if (v) { v.innerHTML = html; document.getElementById('retry')?.addEventListener('click', () => switchTab(tab)); } else screen(html);
@@ -171,8 +177,7 @@ async function boot() {
       if (!cfg.clientId) return loginScreen(L('needLogin'));
       await activityAuth();
     } else {
-      browserAuth();
-      if (!session) return loginScreen(L('needLogin'));
+      browserAuth(); // no token here is fine: the session cookie is checked by /api/me
     }
     me = await api<Me>('/api/me');
     lang = me.lang === 'el' ? 'el' : 'en';

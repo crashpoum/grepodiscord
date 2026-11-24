@@ -13,6 +13,7 @@ import { seedEnvToken } from './gdAuth.js';
 import { Gemini } from './ai/gemini.js';
 import { handleReportContext, handleReportModal } from './bot/aiHandlers.js';
 import { startWebServer } from './web/server.js';
+import { handleWebButton, OPEN_PREFIX } from './bot/webHandlers.js';
 
 if (!config.discordToken) {
   console.error('DISCORD_TOKEN is not set. For a token-free dry run use: npm run cli -- --help');
@@ -47,7 +48,7 @@ client.once(Events.ClientReady, (c) => {
 client.on(Events.InteractionCreate, (i) => {
   if (i.isAutocomplete()) void handleAutocomplete(ctx, i);
   else if (i.isChatInputCommand()) void handleCommand(ctx, i);
-  else if (i.isButton()) void handleButton(ctx, i);
+  else if (i.isButton()) void (i.customId.startsWith(OPEN_PREFIX) ? handleWebButton(ctx, i).catch((e) => log.warn(`web button: ${e}`)) : handleButton(ctx, i));
   else if (i.isModalSubmit()) void handleReportModal(ctx, i);
   else if (i.isMessageContextMenuCommand()) void handleReportContext(ctx, i);
 });

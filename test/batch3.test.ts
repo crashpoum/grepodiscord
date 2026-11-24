@@ -9,7 +9,7 @@ import { issueSession, sign, verify, webSecret, bearer } from '../src/web/auth.j
 import { activeCommands, Budget, LiveHub, normUnits } from '../src/web/live.js';
 import { buildMapPayload } from '../src/web/mapData.js';
 import { createWebApp, dashboardLink } from '../src/web/server.js';
-import { activityUrl, launchPlan } from '../src/bot/webHandlers.js';
+import { activityUrl, handleLiveMap, handleWebButton, launchPlan, OPEN_PREFIX } from '../src/bot/webHandlers.js';
 import { ownerAtTime, townXY, allianceColor } from '../web/src/geo.js';
 import { WEB_STRINGS, wt } from '../src/web/strings.js';
 import { STRINGS } from '../src/i18n.js';
@@ -66,12 +66,13 @@ describe('web sessions', () => {
     expect(webSecret(store, '')).toBe(a);
     expect(webSecret(store, 'x'.repeat(20))).toBe('x'.repeat(20));
   });
-  it('dashboard links put the session in the fragment', () => {
+  it('dashboard links carry the token in the query of /go/<tab> (no #fragment)', () => {
     const old = config.publicUrl;
     config.publicUrl = 'https://live.example.com';
     const l = dashboardLink('k'.repeat(32), 'g1', 'u1', 'Al', 'map', 12, 1000)!;
-    expect(l.startsWith('https://live.example.com/map#s=')).toBe(true);
-    expect(verify(l.split('#s=')[1], 'k'.repeat(32), 2000)).toMatchObject({ g: 'g1', u: 'u1', k: 'link' });
+    expect(l.startsWith('https://live.example.com/go/map?t=')).toBe(true);
+    expect(l).not.toContain('#');
+    expect(verify(new URL(l).searchParams.get('t'), 'k'.repeat(32), 2000)).toMatchObject({ g: 'g1', u: 'u1', k: 'link' });
     config.publicUrl = '';
     expect(dashboardLink('k', 'g', 'u', 'n', 'live', 1)).toBeNull();
     config.publicUrl = old;
@@ -88,8 +89,8 @@ describe('/live and /map launch', () => {
   it('chooses shared / private / none', () => {
     expect(launchPlan('live', false, { activity: null, browser: null }).kind).toBe('none');
     expect(launchPlan('live', true, { activity: 'a', browser: 'b' }).kind).toBe('shared');
-    expect(launchPlan('live', true, { activity: null, browser: 'b' })).toEqual({ kind: 'private', note: 'web.shareNoActivity' });
-    expect(launchPlan('map', false, { activity: 'a', browser: null })).toEqual({ kind: 'private', note: null });
+    expect(launchPlan('live', true, { activity: null, browser: 'b' }).kind).toBe('shared'); // public even without the Activity
+    expect(launchPlan('map', false, { activity: 'a', browser: null }).kind).toBe('private');
   });
   it('registers /live and /map with Greek names', () => {
     const cmds = commandJson() as { name: string; name_localizations?: Record<string, string> }[];
@@ -263,5 +264,105 @@ describe('web server', () => {
       expect((await post({ code: 'good', guild_id: '99999999' })).status).toBe(403); // not a member
       expect((await post({ code: 'good' })).status).toBe(400); // DM
     } finally { s.close(); [config.activityClientId, config.activityClientSecret] = old; }
+  });
+});
+
+describe('fixes: personal link behind the tunnel, public share', () => {
+  const SECRET = 'q'.repeat(32);
+  async function stack(c: Ctx) {
+    const app = createWebApp({ ctx: c, guilds: { has: (g) => g === 'g1', name: () => 'Red' }, secret: SECRET, staticDir: null, fetchImpl: fetch,
+      hub: new LiveHub(c, async () => [], { pollSeconds: 20, rpm: 5, now: Date.now }) });
+    const bot = http.createServer(app.handler);
+    await new Promise<void>((r) => bot.listen(0, '127.0.0.1', () => r()));
+    const botPort = (bot.address() as AddressInfo).port;
+    // Stand-in for cloudflared: plain http to the bot, X-Forwarded-Proto: https, CF-Connecting-IP.
+    const proxy = http.createServer((req, res) => {
+      const up = http.request({ host: '127.0.0.1', port: botPort, path: req.url, method: req.method, headers: { ...req.headers, 'x-forwarded-proto': 'https', 'cf-connecting-ip': '203.0.113.9' } }, (r) => { res.writeHead(r.statusCode!, r.headers); r.pipe(res); });
+      req.pipe(up);
+    });
+    await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', () => r()));
+    return { base: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`, close: () => { app.hub.stop(); bot.close(); proxy.close(); } };
+  }
+
+  it('a fresh /live link logs in through the proxy: cookie (Secure, HttpOnly) + redirect to the clean URL, then the API works', async () => {
+    const old = config.publicUrl;
+    config.publicUrl = 'https://grepo.example.com';
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const st = await stack(c);
+    try {
+      const link = dashboardLink(SECRET, 'g1', 'u1', 'Μέλος 🛡️', 'live', 12)!;
+      const r = await fetch(`${st.base}${new URL(link).pathname}${new URL(link).search}`, { redirect: 'manual' });
+      expect(r.status).toBe(302);
+      expect(r.headers.get('location')).toBe('/live');
+      expect(r.headers.get('cache-control')).toBe('no-store');
+      const cookie = r.headers.get('set-cookie')!;
+      expect(cookie).toMatch(/^gc_session=[^;]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=4319\d; Secure$/);
+      const me = await fetch(`${st.base}/api/me`, { headers: { Cookie: cookie.split(';')[0] } });
+      expect(me.status).toBe(200);
+      expect(await me.json()).toMatchObject({ guildId: 'g1', user: 'Μέλος 🛡️' });
+      // no cookie at all -> "please open it from Discord" (reason none), not "expired"
+      const none = await fetch(`${st.base}/api/me`);
+      expect(none.status).toBe(401);
+      expect(await none.json()).toMatchObject({ reason: 'none', error: STRINGS.en['web.err.login'] });
+    } finally { st.close(); config.publicUrl = old; }
+  });
+
+  it('says WHY a link is refused: other signing key, expired, bot not in the server', async () => {
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    const st = await stack(c);
+    try {
+      const other = issueSession('another-process-key-xxxxxxxxxxxx', { u: 'u1', g: 'g1' });
+      const bad = await fetch(`${st.base}/go/live?t=${other}`, { redirect: 'manual' });
+      expect(bad.status).toBe(401);
+      expect(await bad.text()).toContain('not signed by this bot');
+      const old = issueSession(SECRET, { u: 'u1', g: 'g1' }, 1, Date.now() - 2 * 3600_000);
+      const exp = await fetch(`${st.base}/api/me`, { headers: { Authorization: `Bearer ${old}` } });
+      expect(await exp.json()).toMatchObject({ reason: 'expired' });
+      const foreign = issueSession(SECRET, { u: 'u1', g: 'g9' });
+      expect(await (await fetch(`${st.base}/api/me`, { headers: { Authorization: `Bearer ${foreign}` } })).json()).toMatchObject({ reason: 'guild' });
+    } finally { st.close(); }
+  });
+
+  function fakeInteraction(commandName: string, share: boolean) {
+    const calls: { kind: string; payload: any }[] = [];
+    const ser = (p: unknown) => JSON.parse(JSON.stringify(p, (_k, v) => (v && typeof v.toJSON === 'function' ? v.toJSON() : v)));
+    const i: any = { guildId: 'g1', commandName, customId: `${OPEN_PREFIX}map`, user: { id: 'u7', username: 'friend' }, member: { displayName: 'Friend' },
+      options: { getBoolean: () => share },
+      reply: async (p: unknown) => { calls.push({ kind: 'reply', payload: ser(p) }); }, followUp: async (p: unknown) => { calls.push({ kind: 'followUp', payload: ser(p) }); } };
+    return { i, calls };
+  }
+
+  it('share:true posts PUBLICLY with a per-click button, never a personal link (with and without the Activity)', async () => {
+    const saved = [config.publicUrl, config.webEnabled, config.activityClientId, config.activityLink];
+    config.publicUrl = 'https://grepo.example.com'; config.webEnabled = true; config.activityLink = '';
+    const c = ctxWith((async () => json({}, 404)) as typeof fetch);
+    try {
+      for (const act of ['', '1234567890']) {
+        config.activityClientId = act;
+        const { i, calls } = fakeInteraction('map', true);
+        await handleLiveMap(c, i, 'el', 'gr999');
+        expect(calls).toHaveLength(1);
+        const p = calls[0].payload;
+        expect(p.flags ?? 0).toBe(0); // not ephemeral
+        const text = JSON.stringify(p);
+        expect(text).not.toContain('/go/');
+        expect(text).not.toContain('?t=');
+        const buttons = p.components[0].components;
+        expect(buttons.find((b: any) => b.custom_id === `${OPEN_PREFIX}map`)).toBeTruthy();
+        if (act) expect(text).toContain(`https://discord.com/activities/${act}?custom_id=map`);
+      }
+      // a clicker gets their OWN private link
+      const { i, calls } = fakeInteraction('map', true);
+      await handleWebButton(c, i);
+      const p = calls[0].payload;
+      expect(p.flags).toBe(64);
+      const url = p.components[0].components[0].url as string;
+      expect(url.startsWith('https://grepo.example.com/go/map?t=')).toBe(true);
+      expect(verify(new URL(url).searchParams.get('t'), webSecret(c.store))).toMatchObject({ u: 'u7', g: 'g1' });
+      // without share: private reply with the personal link
+      const priv = fakeInteraction('live', false);
+      await handleLiveMap(c, priv.i, 'en', 'gr999');
+      expect(priv.calls[0].payload.flags).toBe(64);
+    } finally { [config.publicUrl, config.webEnabled, config.activityClientId, config.activityLink] = saved as [string, boolean, string, string]; }
   });
 });

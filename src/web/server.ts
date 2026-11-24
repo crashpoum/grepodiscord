@@ -25,11 +25,14 @@ import { UNIT_EN } from '../planner.js';
 import { classifyError, logError } from '../bot/errors.js';
 import { LiveHub } from './live.js';
 import { buildMapPayload } from './mapData.js';
-import { authorizeUrl, bearer, discordGet, exchangeCode, issueSession, OAuthError, sign, verify, webSecret, type DiscordGuild, type DiscordUser, type WebSession } from './auth.js';
+import { authorizeUrl, bearer, check, discordGet, exchangeCode, issueSession, keyId, OAuthError, readCookie, sessionCookie, sign, verify, webSecret, type DiscordGuild, type DiscordUser, type WebSession } from './auth.js';
 import { termsPage, privacyPage, messagePage, pickerPage } from './pages.js';
 
 export interface BotGuilds { has(id: string): boolean; name(id: string): string | null }
 export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; now?: () => number }
+
+type AuthFail = 'none' | 'bad' | 'expired' | 'guild';
+const AUTH_KEY = { none: 'web.err.login', bad: 'web.err.badLink', expired: 'web.err.auth', guild: 'web.err.notMember' } as const;
 
 const STATIC: Record<string, string> = { '/app.js': 'application/javascript; charset=utf-8', '/app.css': 'text/css; charset=utf-8', '/app.js.map': 'application/json' };
 const FRAME_ANCESTORS = "'self' https://discord.com https://*.discord.com https://*.discordsays.com";
@@ -95,10 +98,24 @@ export function createWebApp(deps: WebDeps) {
   /** A guild the web app may serve: the bot is in it and it has a world. */
   const usable = (g: string) => guilds.has(g) && !!ctx.store.getGuild(g).world;
 
-  function session(req: http.IncomingMessage): WebSession | null {
-    const s = verify<WebSession>(bearer(req.headers.authorization), secret, now());
-    return s && guilds.has(s.g) ? s : null;
+  /** Session from `Authorization: Bearer` (Activity) or the session cookie (browser), with the reason when refused. */
+  function session(req: http.IncomingMessage): { s: WebSession } | { why: AuthFail } {
+    const b = bearer(req.headers.authorization);
+    const tok = b ?? readCookie(req.headers.cookie);
+    const r = check<WebSession>(tok, secret, now());
+    if (!r.ok) {
+      if (r.why !== 'none') log.warn(`web: ${b ? 'bearer' : 'cookie'} session refused (${r.why}${r.exp ? `, expired ${new Date(r.exp).toISOString()}` : ''}); this process signs with key ${keyId(secret)}`);
+      return { why: r.why };
+    }
+    if (!guilds.has(r.v.g)) { log.warn(`web: session for guild ${r.v.g} refused: the bot is not in that server (or not connected yet)`); return { why: 'guild' }; }
+    return { s: r.v };
   }
+  const secureCookie = (req: http.IncomingMessage) => config.publicUrl.startsWith('https://') || String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https';
+  /** Store the session in a cookie and send the browser to the clean page URL (no token left in the address bar). */
+  const login = (req: http.IncomingMessage, res: Res, token: string, exp: number, tab: string) => {
+    res.writeHead(302, { Location: `/${tab === 'map' ? 'map' : 'live'}`, 'Set-Cookie': sessionCookie(token, (exp - now()) / 1000, secureCookie(req)), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+    res.end();
+  };
 
   function indexHtml(): string | null {
     if (!staticDir) return null;
@@ -188,7 +205,7 @@ export function createWebApp(deps: WebDeps) {
       const ok = u.guildIds.filter(usable);
       const name = u.user.global_name || u.user.username;
       if (!ok.length) return html(res, 403, messagePage(lang0, t(lang0, 'web.err.notMember')));
-      if (ok.length === 1) return redirect(res, `/${st.n}#s=${issueSession(secret, { u: u.user.id, g: ok[0], n: name, k: 'oauth' }, undefined, now())}`);
+      if (ok.length === 1) { const tok = issueSession(secret, { u: u.user.id, g: ok[0], n: name, k: 'oauth' }, undefined, now()); return login(req, res, tok, verify<WebSession>(tok, secret, now())!.exp, st.n); }
       const pick = sign({ u: u.user.id, gs: ok, n: st.n, nm: name, exp: now() + 10 * 60_000 }, secret);
       return html(res, 200, pickerPage(lang0, ok.map((g) => ({ id: g, name: guilds.name(g) ?? g, href: `/oauth/pick?g=${g}&t=${encodeURIComponent(pick)}` }))));
     }
@@ -196,14 +213,32 @@ export function createWebApp(deps: WebDeps) {
       const pk = verify<{ u: string; gs: string[]; n: string; nm: string; exp: number }>(url.searchParams.get('t'), secret, now());
       const g = url.searchParams.get('g') ?? '';
       if (!pk || !pk.gs.includes(g)) return html(res, 400, messagePage(lang0, t(lang0, 'web.err.auth')));
-      return redirect(res, `/${pk.n === 'map' ? 'map' : 'live'}#s=${issueSession(secret, { u: pk.u, g, n: pk.nm, k: 'oauth' }, undefined, now())}`);
+      const tok = issueSession(secret, { u: pk.u, g, n: pk.nm, k: 'oauth' }, undefined, now());
+      return login(req, res, tok, verify<WebSession>(tok, secret, now())!.exp, pk.n);
+    }
+
+    // ---- Personal link from /live or /map: token in the query -> session cookie -> clean URL
+    const go = /^\/go\/(live|map)$/.exec(p);
+    if (req.method === 'GET' && go) {
+      const r = check<WebSession>(url.searchParams.get('t'), secret, now());
+      if (!r.ok) {
+        log.warn(`web: personal link refused (${r.why}); this process signs with key ${keyId(secret)}`);
+        return html(res, 401, messagePage(lang0, t(lang0, AUTH_KEY[r.why])));
+      }
+      if (!guilds.has(r.v.g)) return html(res, 403, messagePage(lang0, t(langOf(r.v.g), 'web.err.notMember')));
+      return login(req, res, url.searchParams.get('t')!, r.v.exp, go[1]);
+    }
+    if (req.method === 'GET' && p === '/logout') {
+      res.writeHead(302, { Location: '/', 'Set-Cookie': sessionCookie('', 0, secureCookie(req)), 'Cache-Control': 'no-store' });
+      return void res.end();
     }
 
     // ---- Data API
     if (p.startsWith('/api/')) {
       if (req.method !== 'GET') return json(res, 405, { error: 'method' });
-      const s = session(req);
-      if (!s) return json(res, 401, { error: t(lang0, 'web.err.auth') });
+      const sr = session(req);
+      if (!('s' in sr)) return json(res, 401, { error: t(lang0, AUTH_KEY[sr.why]), reason: sr.why });
+      const s = sr.s;
       const lang = langOf(s.g);
       if (p === '/api/me') {
         const gc = ctx.store.getGuild(s.g, config.defaultLang);
@@ -236,14 +271,18 @@ export function startWebServer(ctx: Ctx, guilds: BotGuilds) {
   server.requestTimeout = 30_000;
   server.headersTimeout = 15_000;
   server.listen(config.webPort, '0.0.0.0', () => {
+    log.info(`web: signing key ${keyId(secret)}${config.webSecret.length >= 16 ? ' (WEB_SECRET)' : ' (generated, stored in the DB)'}`);
     log.info(`web: live window on :${config.webPort}${config.publicUrl ? ` (public ${config.publicUrl})` : ''}; Activity app ${config.activityClientId ? 'configured' : 'not configured'}${findStaticDir() ? '' : ' — WARNING: web bundle missing'}`);
   });
   server.on('error', (e) => log.error('web server error', e));
   return { secret, close: () => { app.hub.stop(); server.close(); } };
 }
 
-/** Signed personal dashboard link for /live and /map (fragment, so the token never reaches logs or referrers). */
+/**
+ * Signed personal dashboard link for /live and /map. The token is in the QUERY of /go/<tab>: the server swaps it for an
+ * HttpOnly cookie and redirects to the clean URL. (A #fragment is not reliably kept by Discord's link buttons.)
+ */
 export function dashboardLink(secret: string, guildId: string, userId: string, name: string, tab: 'live' | 'map', hours: number, at = Date.now()): string | null {
   if (!config.publicUrl) return null;
-  return `${config.publicUrl}/${tab}#s=${issueSession(secret, { u: userId, g: guildId, n: name, k: 'link' }, hours, at)}`;
+  return `${config.publicUrl}/go/${tab}?t=${issueSession(secret, { u: userId, g: guildId, n: name, k: 'link' }, hours, at)}`;
 }

@@ -26,17 +26,42 @@ export function sign(payload: object, secret: string): string {
   return `${body}.${b64(createHmac('sha256', secret).update(body).digest())}`;
 }
 
-export function verify<T extends { exp: number }>(token: string | null | undefined, secret: string, now = Date.now()): T | null {
-  if (!token || token.length > 2048) return null;
+export type VerifyFail = 'none' | 'bad' | 'expired';
+/** Like verify() but says why a token was refused (missing, bad signature/format, or expired). */
+export function check<T extends { exp: number }>(token: string | null | undefined, secret: string, now = Date.now()): { ok: true; v: T } | { ok: false; why: VerifyFail; exp?: number } {
+  if (!token) return { ok: false, why: 'none' };
+  if (token.length > 2048) return { ok: false, why: 'bad' };
   const [body, mac] = token.split('.');
-  if (!body || !mac) return null;
+  if (!body || !mac) return { ok: false, why: 'bad' };
   const want = createHmac('sha256', secret).update(body).digest();
   const got = Buffer.from(mac, 'base64url');
-  if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+  if (got.length !== want.length || !timingSafeEqual(got, want)) return { ok: false, why: 'bad' };
   try {
     const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as T;
-    return typeof p.exp === 'number' && p.exp > now ? p : null;
-  } catch { return null; }
+    if (typeof p.exp !== 'number') return { ok: false, why: 'bad' };
+    return p.exp > now ? { ok: true, v: p } : { ok: false, why: 'expired', exp: p.exp };
+  } catch { return { ok: false, why: 'bad' }; }
+}
+
+export function verify<T extends { exp: number }>(token: string | null | undefined, secret: string, now = Date.now()): T | null {
+  const r = check<T>(token, secret, now);
+  return r.ok ? r.v : null;
+}
+
+/** Short, non-reversible fingerprint of the signing key, logged so two processes with different keys are easy to spot. */
+export const keyId = (secret: string) => createHmac('sha256', 'grepocord-key-id').update(secret).digest('hex').slice(0, 8);
+
+export const COOKIE = 'gc_session';
+export function readCookie(header: string | undefined, name = COOKIE): string | null {
+  for (const part of (header ?? '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return null;
+}
+/** Session cookie: HttpOnly, SameSite=Lax, Secure when the public side is https (behind the tunnel the bot itself only sees http). */
+export function sessionCookie(token: string, maxAgeSec: number, secure: boolean): string {
+  return `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.max(0, Math.floor(maxAgeSec))}${secure ? '; Secure' : ''}`;
 }
 
 export const SESSION_HOURS = 12;

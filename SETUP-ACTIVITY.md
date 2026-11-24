@@ -160,7 +160,8 @@ Then press **Verify App**. Discord changes the checklist from time to time. If i
 * Access requires a signed session tied to **one Discord server**, from one of:
   * the Activity OAuth (membership checked),
   * Discord login (membership checked, only servers that have the bot and a world),
-  * a personal link from `/live` or `/map` (valid 12 h; the token sits in the URL fragment, so it never reaches logs).
+  * a personal link from `/live` or `/map` (`/go/<tab>?t=…`, valid 12 h). The bot swaps it for an HttpOnly, SameSite=Lax session cookie (Secure when `PUBLIC_URL` is https) and redirects to the clean `/live` / `/map` URL.
+* `share:true` posts publicly: the Activity link and an **Open in browser** button that sends each clicker their own private link. A personal link is never posted publicly.
 * Anyone who can run `/live` in a server can see that server's live intel. This is the same rule as `/intel`. Don't forward personal links.
 * The GrepoData token never leaves the server. The Discord OAuth token is used once and not stored.
 
@@ -175,4 +176,5 @@ Then press **Verify App**. Discord changes the checklist from time to time. If i
 | "Discord login failed" | Wrong `ACTIVITY_CLIENT_SECRET`, or the redirect `https://grepo.example.com/oauth/callback` was not added in OAuth2 |
 | Live: "not in any active command-share team" | Add the GrepoData account (the one whose token the bot uses) to a team for this world on grepodata.com |
 | Live: intel token errors | Same fixes as `/intel`: `/grepodata status`, `/grepodata token` |
+| Browser page says the session expired / the link is not signed by this bot | Check `docker compose logs bot \| grep "web:"`. At startup the bot logs `web: signing key <id>`, and every refused link logs the reason (`bad` = another key, `expired`, or bot not in the server). `bad` means another process with the same `DISCORD_TOKEN` answered the command (an old container, `npm run dev` somewhere) or the key changed. Run only one bot, or set the same `WEB_SECRET` everywhere |
 | Map is empty | The world data is still loading. Wait for the first refresh (`docker compose logs bot`) |

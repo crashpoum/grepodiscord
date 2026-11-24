@@ -1,9 +1,11 @@
-# GrepoDiscord v1
+# GrepoCord
+
+_Formerly GrepoDiscord. Upgrading an existing install? See [Upgrading](#upgrading)._
 
 A Grepolis Discord bot for a private alliance server, built so it can go public later (every setting is per server).
 MIT licensed. TypeScript, discord.js v14, SQLite via Node's built-in `node:sqlite`, Docker Compose.
 
-## What it does (v1)
+## What it does
 
 | Area | Commands | Data source |
 |---|---|---|
@@ -11,9 +13,29 @@ MIT licensed. TypeScript, discord.js v14, SQLite via Node's built-in `node:sqlit
 | Live feeds | `/feed add type:conquests\|alliance\|bp channel [alliance] [player] [ocean] [min_bp] [bp_kind] [skip_ghosts]` · `/feed list` · `/feed remove id` | Diffs between successive official hourly files |
 | Radar | `/radar inactive [hours] [ocean] [near_town] [radius] [min_points]` · `/radar ghosts [ocean] [near_town] [radius] [min_points]` | Our own activity tracking from the hourly files. Until enough history exists, GrepoData's `hours_inactive` fills the gap (shown with `*`) |
 | Verification + roles | `/verify start player` · `/verify check` · `/verify status` · `/verify unlink` · `/roles verified role` · `/roles alliance alliance role` · `/roles remove alliance` · `/roles list` · `/roles sync` | Public town names in `towns.txt` |
+| Rankings and scoreboards | `/top today [kind]` · `/top yesterday [kind]` · `/top hour [hour]` · `/top ranking [kind] [sort] [page]` | GrepoData scoreboards (daily ABP/DBP/conquered/lost, per-hour BP gains) and rankings (points, attack, defence, total BP, towns, members) |
+| Wars and history | `/wars alliance` · `/changes alliance\|player\|world` · `/conquests player\|alliance\|town [filter] [page]` | GrepoData alliance wars, join/leave history and full conquest history (enemy, friendly or internal) |
+| Towns | `/town search query` · `/town info town` · `/town radar [town] [x y] [radius] [ghosts_only]` | GrepoData town search, town details and radar (falls back to the official files if GrepoData is down) |
+| Intel (City Indexer) | `/intel town\|player\|alliance` | GrepoData City Indexer with **this server's** GrepoData token (see [Intel](#intel-grepodata-city-indexer)) |
+| GrepoData account (admins) | `/grepodata token access_token [refresh_token]` · `/grepodata status` · `/grepodata channel [channel]` · `/grepodata clear` | Replies are always private |
 | Settings | `/setup world` · `/setup language en\|el` · `/setup show` · `/help` | |
 
-Commands are localized in English and Greek (`/setup language`). The Greek command descriptions use Discord's `el` locale.
+Everything is in English and Greek. Bot replies follow `/setup language`. Command, subcommand, option and choice **names and descriptions** are localized with Discord's `el` locale, so members whose Discord is in Greek see e.g. `/κορυφαίοι σήμερα` or `/πόλη ραντάρ`. A test enforces that every command element has a Greek name and description and that the EN/GR string tables match.
+
+All times from GrepoData are in the world's own time zone (gr worlds: Europe/Athens). The bot converts them to Discord timestamps, so every reader sees their own local time.
+
+## Intel (GrepoData City Indexer)
+Intel comes from your **GrepoData account** (the one you use on grepodata.com with the userscript). It is not your game account, and the bot never sees a game password.
+
+- **Scope.** Each Discord server has its own token. Intel is only ever fetched with the token of the server where the command runs, and it is only shown in that server. Replies are private (only the person asking sees them). The exception is the channel an admin picks with `/grepodata channel`: intel asked for there is posted publicly. Caches are kept separate per server.
+- **Setting the token.** An admin (Manage Server) runs `/grepodata token access_token:<…> refresh_token:<…>`. The reply is private. Tokens are stored in the SQLite DB, sent only as a request header to api.grepodata.com, and never logged or shown again. `/grepodata status` shows the account name, expiry and auto-renewal state, never the token itself.
+- **Where to find the tokens.** Sign in at https://grepodata.com in a desktop browser. Press F12, then open Application (Chrome/Edge) or Storage (Firefox) → Local Storage → `https://grepodata.com`. Copy the values of `access_token` and `refresh_token`.
+- **Expiry and renewal.** GrepoData access tokens last **24 h**. Refresh tokens last **90 days** and are replaced on every use.
+  - **With a refresh token:** about 2 h before the access token expires, the bot calls `POST /auth/refresh` and stores the new pair. This repeats every day, so the 90-day window keeps moving and no further action is needed.
+  - **Without a refresh token:** the bot DMs the admin who set the token about 6 h before it expires, and again when it has expired.
+  - **If renewal is rejected:** the bot stops trying (GrepoData bans IPs that cause many 401s), pauses intel and DMs the admin.
+  - **Optional fallback:** `GREPODATA_LOGIN` / `GREPODATA_PASSWORD` let the bot log in again with `POST /auth/login`. This only works for the server in `GREPODATA_GUILD_ID`. It is not needed if you give a refresh token.
+- **Token from `.env`.** Instead of the command you can set `GREPODATA_TOKEN` (and preferably `GREPODATA_REFRESH_TOKEN`). These are bound to **one** server: `GREPODATA_GUILD_ID`, or `DEV_GUILD_ID` if that is empty. A newer token set with `/grepodata token`, or a renewed one, takes precedence. The `.env` value is only applied again when you change it to a newer token.
 
 ### Verification: why a town name and not the profile text
 Grepolis profile texts are **not public**. They are not in the official world data files or in GrepoData's public API. The only way to read them is inside the logged-in game client, and a bot logging into the game breaks InnoGames' rules (§2 account usage, §7 bots/automation). Town names **are** public: they appear in the hourly `towns.txt`. So the member renames **one of their own towns** to include a short code (e.g. `02. Sparta GD7KQ2`), and the bot sees it in the next hourly file. The bot only reads public data, and the human makes the in-game change. Codes expire after 48 h. The bot also checks automatically after each towns refresh, sends the member a DM when verified, and the town can be renamed back afterwards.
@@ -23,7 +45,11 @@ Roles: `/roles verified` sets a role for every linked member, and `/roles allian
 ## ToS compliance (InnoGames)
 - No game login, no session cookies, no game passwords, no internal game (AJAX) API, and no automated in-game actions of any kind.
 - Reads only public data: `https://{world}.grepolis.com/data/*.txt.gz` (with ETag/If-Modified-Since, about 8 small requests per world every 15 min, mostly 304s) and GrepoData's public API.
-- GrepoData politeness: one shared budget (`GREPODATA_RPM`, default 30/min against their ~400/min ban threshold), per-endpoint caching (10 min info, 60 min history, 6 h world list), request de-duplication, stale-if-error, and exponential backoff with a global pause on 429/503.
+- GrepoData politeness:
+  - one shared budget (`GREPODATA_RPM`, default 30/min against their ~400/min ban threshold)
+  - per-endpoint caching: 10 min for info and scoreboards, 15 min for changes and conquests, 30 min for rankings and towns, 60 min for history and wars, 5 min for intel, 6 h for the world list
+  - request de-duplication, stale-if-error, and exponential backoff with a global pause on 429/503
+  - 4xx responses are never retried, which matters for 401s with their fail2ban
 
 ## Architecture
 ```
@@ -31,7 +57,7 @@ src/
   data/parse.ts        pure parsers for official files (PHP urlencoded names)
   data/snapshot.ts     in-memory world snapshot + name search
   data/official.ts     conditional download of world files (ETag/IMS, retries)
-  data/grepodata.ts    GrepoData client (rate limit, cache, backoff)
+  data/grepodata.ts    GrepoData client (rate limit, cache, backoff; public + intel + auth endpoints)
   data/ratelimit.ts    limiter, TTL cache, backoff
   diff.ts              conquests / alliance changes / BP deltas / activity (pure)
   feeds.ts feedPlan.ts feed filters + "what to post" planning (pure)
@@ -39,11 +65,15 @@ src/
   refresh.ts           WorldManager: refresh → events
   embeds.ts charts.ts i18n.ts   presentation
   services.ts          use-cases shared by bot and CLI
+  gdServices.ts gdViews.ts   GrepoData features: use-cases + embeds (pure)
+  gdAuth.ts            GrepoData tokens: JWT decode, renewal plan, guild scoping
+  time.ts              world-local time → Discord timestamps
+  dbPath.ts            grepodiscord.sqlite → grepocord.sqlite migration
   db.ts                SQLite store (node:sqlite)
-  bot/                 commands, handlers, poster (feeds/roles/verification), scheduler
+  bot/                 commands (+ commandsEl.ts Greek names), handlers, gdHandlers, poster, scheduler, tokenCare
   index.ts register.ts cli.ts
 ```
-**Why SQLite?** A private alliance bot writes a few rows an hour. `node:sqlite` is built into Node ≥ 22.13, so there is no native DB module to compile, no DB container, and backups are a single file (`data/grepodiscord.sqlite`). It stores guild config, feeds, links, pending codes, the last version of each world file (gzipped, for diffs), and per-player activity. For a big public deployment, swap `src/db.ts` for PostgreSQL behind the same methods.
+**Why SQLite?** A private alliance bot writes a few rows an hour. `node:sqlite` is built into Node ≥ 22.13, so there is no native DB module to compile, no DB container, and backups are a single file (`data/grepocord.sqlite`). It stores guild config, feeds, links, pending codes, GrepoData tokens per server, the last version of each world file (gzipped, for diffs), and per-player activity. For a big public deployment, swap `src/db.ts` for PostgreSQL behind the same methods.
 
 ## Setup
 
@@ -64,12 +94,17 @@ cp .env.example .env    # fill DISCORD_TOKEN, CLIENT_ID, DEV_GUILD_ID, USER_AGEN
 | `DISCORD_TOKEN` | yes (bot/register) | | Bot token |
 | `CLIENT_ID` | yes (register) | | Application ID |
 | `DEV_GUILD_ID` | no | | Register commands to this server only (instant). Empty = global (up to ~1 h) |
-| `DB_PATH` | no | `./data/grepodiscord.sqlite` | SQLite file |
+| `DB_PATH` | no | `./data/grepocord.sqlite` | SQLite file. An old `grepodiscord.sqlite` in the same folder is renamed automatically |
 | `MARKETS` | no | `gr,en` | Accepted markets |
 | `DEFAULT_LANG` | no | `en` | `en` or `el` for new servers |
 | `REFRESH_MINUTES` | no | `15` | Poll interval for official files |
 | `GREPODATA_RPM` | no | `30` | GrepoData request budget per minute |
-| `USER_AGENT` | no | `GrepoDiscord/1.0 …` | Sent to grepolis.com/grepodata.com. Put a contact address in it |
+| `USER_AGENT` | no | `GrepoCord/1.1 …` | Sent to grepolis.com/grepodata.com. Put a contact address in it |
+| `GREPODATA_TOKEN` | no | | GrepoData `access_token` for intel (alternative to `/grepodata token`) |
+| `GREPODATA_REFRESH_TOKEN` | no | | GrepoData `refresh_token`: enables automatic daily renewal (recommended) |
+| `GREPODATA_GUILD_ID` | no | `DEV_GUILD_ID` | The one Discord server the `.env` token belongs to |
+| `GREPODATA_ADMIN_ID` | no | server owner | Discord user ID to DM about the `.env` token expiring |
+| `GREPODATA_LOGIN` / `GREPODATA_PASSWORD` | no | | Optional GrepoData (not game!) login for re-login when no refresh token works |
 | `LOG_LEVEL` | no | `info` | `debug`/`info`/`warn`/`error` |
 
 ### 3a. Deploy with Docker Compose (on your server)
@@ -79,7 +114,27 @@ docker compose run --rm register        # register slash commands (once, and aft
 docker compose up -d                    # start the bot
 docker compose logs -f bot
 ```
-Data persists in `./data` (back up `data/grepodiscord.sqlite`). Update: `git pull && docker compose build && docker compose run --rm register && docker compose up -d`.
+Data persists in `./data` (back up `data/grepocord.sqlite`). Update: `git pull && docker compose build && docker compose run --rm register && docker compose up -d`.
+
+The container starts as root only to create `/app/data` and `chown` it to the `node` user. That fixes the "unable to open database file" error you get when Docker creates `./data` as root. It then drops privileges with `setpriv` and runs the bot as `node`.
+
+## Upgrading
+### From GrepoDiscord (v1) to GrepoCord
+The image and container are renamed `grepodiscord` → `grepocord`. Your `.env` and `./data` stay where they are. On first start, `data/grepodiscord.sqlite` (with its `-wal`/`-shm` files) is renamed to `data/grepocord.sqlite`.
+
+Run these in the folder that holds `docker-compose.yml`, `.env` and `data/`:
+```bash
+docker compose down                     # stop the OLD container (grepodiscord) while the old compose file is still checked out
+git pull
+docker compose build
+docker compose run --rm register        # re-register: new commands + Greek command names
+docker compose up -d
+docker compose logs -f bot              # expect "Migrated database /app/data/grepodiscord.sqlite -> /app/data/grepocord.sqlite" once
+```
+- **Already pulled before running `docker compose down`?** Remove the old container by name with `docker rm -f grepodiscord`, then continue with `docker compose build`.
+- **Optional cleanup:** remove the old image with `docker image rm grepodiscord:latest`.
+- **Your `.env`:** it may still say `USER_AGENT=GrepoDiscord/…`. That still works, but you can rename it.
+- **Explicit `DB_PATH`:** if your `.env` sets `DB_PATH`, the compose file overrides it inside the container. Outside Docker it is respected as-is.
 
 ### 3b. Run without Docker (Node ≥ 22.13; tested on Node 24)
 ```bash
@@ -90,7 +145,7 @@ npm start
 ```
 
 ### 4. First use in Discord
-1. `/setup world gr126` (or your world), then `/setup language el` if you want Greek.
+1. `/setup world gr125` (or your world), then `/setup language el` if you want Greek.
 2. `/feed add type:conquests channel:#conquests alliance:<yours>`. Add an enemy alliance feed or `ocean:45,46` as needed.
 3. `/feed add type:alliance channel:#diplomacy` and `/feed add type:bp channel:#war min_bp:10000`.
 4. `/roles verified role:@Verified`, then `/roles alliance alliance:<yours> role:@Member`.
@@ -108,6 +163,16 @@ npm run cli -- radar-inactive en180 --hours 24 --ocean 45
 npm run cli -- radar-ghosts gr126 --near "04." --radius 150
 npm run cli -- refresh gr126 --since-hours 3      # prints the embeds each feed would post
 npm run cli -- verify-check gr126 "Player" GDABCD
+npm run cli -- top-today gr125 --kind alliance [--yesterday]
+npm run cli -- top-hour gr125 --hour 17
+npm run cli -- ranking gr125 --kind alliance --sort Att
+npm run cli -- wars gr125 "EL-TRUCOOOOO"
+npm run cli -- changes gr125 alliance "EL-TRUCOOOOO"
+npm run cli -- conquests gr125 player "Grimmjow" --filter enemy --page 2
+npm run cli -- town-search gr125 zagan
+npm run cli -- town-radar gr125 "ZAGAN 14" --radius 40   # or --x 500 --y 500
+npm run cli -- token-status                       # decodes GREPODATA_TOKEN (account, expiry); no network, never prints it
+npm run cli -- intel gr125 town "ZAGAN 14"         # uses GREPODATA_TOKEN from the environment
 npm run smoke                                     # drives the real handlers with fake interactions
 ```
 The CLI keeps its own DB (`CLI_DB_PATH`, default `./data/cli.sqlite`). Run `refresh` again after the next hourly file update to see real alliance-change and BP diffs. With Docker: `docker compose run --rm cli refresh gr126`.
@@ -115,7 +180,7 @@ The CLI keeps its own DB (`CLI_DB_PATH`, default `./data/cli.sqlite`). Run `refr
 ## Development
 ```bash
 npm run typecheck   # tsc (src + tests)
-npm test            # vitest: parsers, diffs, feeds, radar, verification, roles, limiter, client, i18n, store
+npm test            # vitest: parsers, diffs, feeds, radar, verification, roles, limiter, GrepoData client/auth/views, Greek command localization, i18n, store
 npm run build       # → compiled/
 ```
 
@@ -124,3 +189,5 @@ npm run build       # → compiled/
 - Distances use island coordinates. Exact in-game distance also depends on the town's slot inside the island, and those templates are not public.
 - The inactive radar needs N hours of our own tracking. Before that it asks GrepoData for up to 10 candidates per query.
 - GrepoData's public API is undocumented and could change. Lookups fall back to official data (without charts) if it fails.
+- GrepoData's `/town/radar` is centred on a town. For x/y coordinates the bot uses the nearest town as the anchor and filters by island distance itself.
+- Intel requires a GrepoData account that is a member of the relevant City Indexer teams. The bot only shows what that account can see.

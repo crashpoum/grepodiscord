@@ -7,14 +7,14 @@ import { handleAutocomplete, handleCommand } from '../src/bot/handlers.js';
 const store = new Store(':memory:');
 // reuse CLI cache for speed
 const cli = new Store(process.env.CLI_DB_PATH ?? './data/cli.sqlite');
-for (const f of ['players','alliances','towns','conquers','player_kills_att','player_kills_def','alliance_kills_att','alliance_kills_def']) { const c = cli.getFile('gr126', f); if (c) store.putFile('gr126', f, c); }
+for (const w of ['gr126', 'gr125']) for (const f of ['players','alliances','towns','conquers','player_kills_att','player_kills_def','alliance_kills_att','alliance_kills_def']) { const c = cli.getFile(w, f); if (c) store.putFile(w, f, c); }
 const ctx = { store, worlds: new WorldManager(store), gd: new GrepoDataClient() };
 
 function fake(commandName: string, sub: string | null, opts: Record<string, unknown>, focused?: string) {
   const out: unknown[] = [];
   const role = (id: string) => ({ id });
   const i: any = {
-    commandName, guildId: 'G1', user: { id: 'U1' },
+    commandName, guildId: 'G1', channelId: 'CH1', user: { id: 'U1' }, memberPermissions: { has: () => true },
     guild: { id: 'G1', name: 'Test', members: { fetch: async () => ({ roles: { cache: new Map([['other', {}]]), add: async (r: string[]) => out.push({ addRoles: r }), remove: async (r: string[]) => out.push({ removeRoles: r }) } }) } },
     deferred: false, replied: false,
     options: {
@@ -46,3 +46,28 @@ const p = store.getPending('G1', 'U1')!; const town = (await ctx.worlds.ensure('
 store.setPending({ ...p, code: town.name });
 r = fake('verify', 'check', {}); await handleCommand(ctx, r.i); show('verify check (simulated match)', r.out);
 r = fake('setup', 'show', {}); await handleCommand(ctx, r.i); show('setup show', r.out);
+
+// ---- GrepoData features on gr125 (live public API; intel only without a real token → no 401s)
+store.setGuild({ guildId: 'G1', world: 'gr125', lang: 'en', verifiedRoleId: null });
+const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+const fakeJwt = (exp: number) => `${b64({ typ: 'JWT' })}.${b64({ username: 'smoke', iat: exp - 86400, exp })}.sig`;
+const now = Math.floor(Date.now() / 1000);
+for (const [label, cmd, sub, opts] of [
+  ['top today', 'top', 'today', {}], ['top yesterday alliances', 'top', 'yesterday', { kind: 'alliance' }], ['top hour', 'top', 'hour', {}],
+  ['top ranking', 'top', 'ranking', { kind: 'alliance', sort: 'AttDef' }], ['wars', 'wars', null, { alliance: 'EL-TRUCOOOOO' }],
+  ['changes alliance', 'changes', 'alliance', { alliance: 'EL-TRUCOOOOO' }], ['changes world p2', 'changes', 'world', { page: 2 }],
+  ['conquests player', 'conquests', 'player', { player: 'Grimmjow', filter: 'enemy' }], ['town search', 'town', 'search', { query: 'zagan' }],
+  ['town info', 'town', 'info', { town: 'ZAGAN 14' }], ['town radar xy', 'town', 'radar', { x: 500, y: 500, radius: 6 }], ['town radar none', 'town', 'radar', {}],
+  ['intel without token', 'intel', 'town', { town: 'ZAGAN 14' }],
+  ['token invalid', 'grepodata', 'token', { access_token: 'not-a-token' }],
+  ['token expired, no refresh', 'grepodata', 'token', { access_token: fakeJwt(now - 60) }],
+  ['token ok (no network)', 'grepodata', 'token', { access_token: fakeJwt(now + 3600) }],
+  ['status', 'grepodata', 'status', {}], ['channel', 'grepodata', 'channel', { channel: 'CH1' }], ['clear', 'grepodata', 'clear', {}],
+  ['intel after clear', 'intel', 'player', { player: 'ZAGAN' }],
+] as const) {
+  const f = fake(cmd, sub, opts as Record<string, unknown>);
+  if (cmd === 'grepodata' && sub === 'channel' && !(opts as Record<string, unknown>).channel) f.i.options.getChannel = () => null;
+  await handleCommand(ctx, f.i);
+  show(label, f.out);
+}
+r = fake('intel', 'town', { town: 'ZAGAN' }, 'town'); await handleAutocomplete(ctx, r.i); show('autocomplete intel town', r.out);

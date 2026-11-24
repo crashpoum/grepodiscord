@@ -1,5 +1,5 @@
 {
-  "name": "grepodiscord",
+  "name": "grepocord",
   "version": "1.0.0",
   "description": "Grepolis Discord bot (v1): lookups, feeds, radar, verification",
   "main": "compiled/index.js",

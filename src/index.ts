@@ -3,19 +3,22 @@ import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { config } from './config.js';
 import { log } from './log.js';
 import { Store } from './db.js';
+import { resolveDbPath } from './dbPath.js';
 import { WorldManager } from './refresh.js';
 import { GrepoDataClient } from './data/grepodata.js';
 import { handleAutocomplete, handleCommand } from './bot/handlers.js';
 import { startScheduler } from './bot/scheduler.js';
+import { seedEnvToken } from './gdAuth.js';
 
 if (!config.discordToken) {
   console.error('DISCORD_TOKEN is not set. For a token-free dry run use: npm run cli -- --help');
   process.exit(1);
 }
 
-const store = new Store(config.dbPath);
+const store = new Store(resolveDbPath(config.dbPath, (m) => log.info(m)));
 const ctx = { store, worlds: new WorldManager(store), gd: new GrepoDataClient() };
 for (const w of store.trackedWorlds()) ctx.worlds.loadFromCache(w);
+seedEnvToken(store);
 
 // Guilds intent only: no privileged intents (no message content, no member list scraping).
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });

@@ -2,6 +2,7 @@ import type { Client } from 'discord.js';
 import { config } from '../config.js';
 import { log } from '../log.js';
 import type { Ctx } from '../services.js';
+import { runTokenCare } from './tokenCare.js';
 import { postFeedEvents, processPendingVerifications, syncRolesForWorld } from './poster.js';
 
 /** Polls tracked worlds every REFRESH_MINUTES; files change ~hourly, conditional GETs make no-op polls cheap. */
@@ -28,5 +29,9 @@ export function startScheduler(client: Client, ctx: Ctx): () => void {
   };
   void tick();
   const h = setInterval(() => void tick(), config.refreshMinutes * 60_000);
-  return () => clearInterval(h);
+  // GrepoData tokens: check shortly after start, then every 30 minutes (cheap: only DB reads unless renewal is due).
+  const care = () => void runTokenCare(client, ctx).catch((e) => log.error(`token care failed: ${e}`));
+  const t0 = setTimeout(care, 15_000);
+  const h2 = setInterval(care, 30 * 60_000);
+  return () => { clearInterval(h); clearInterval(h2); clearTimeout(t0); };
 }

@@ -10,6 +10,8 @@ import { DEFAULT_MIN_BP, type FeedFilter, type FeedType } from '../feeds.js';
 import { generateCode } from '../verify.js';
 import { allianceCard, checkVerification, playerCard, radarGhosts, radarInactive, resolveAlliance, resolvePlayer, type Ctx } from '../services.js';
 import { syncGuildRoles } from './poster.js';
+import { gdAdmin, gdIntel, gdPublic } from './gdHandlers.js';
+import { UserError } from '../gdServices.js';
 
 const COLOR_OK = 0x57f287;
 const COLOR_ERR = 0xed4245;
@@ -44,7 +46,7 @@ export async function handleAutocomplete(ctx: Ctx, i: AutocompleteInteraction) {
     const cmd = i.commandName;
     let choices: { name: string; value: string }[] = [];
     const isAlliance = focused.name === 'alliance' || (cmd === 'alliance' && focused.name === 'name');
-    const isTown = focused.name === 'near_town';
+    const isTown = focused.name === 'near_town' || focused.name === 'town';
     if (isAlliance) {
       choices = searchByName(snap.alliances.values(), q, 25, (a) => a.points).map((a) => ({ name: `${a.name} · ${fmt(a.points, 'en')} pts · ${a.members} m.`, value: `id:${a.id}` }));
     } else if (isTown) {
@@ -71,10 +73,17 @@ export async function handleCommand(ctx: Ctx, i: ChatInputCommandInteraction) {
       case 'feed': return await feed(ctx, i, lang);
       case 'verify': return await verify(ctx, i, lang);
       case 'roles': return await roles(ctx, i, lang);
+      case 'grepodata': return await gdAdmin(ctx, i, lang);
+      case 'top': case 'wars': case 'changes': case 'conquests': case 'town': case 'intel': {
+        const world = await requireWorld(ctx, i, lang);
+        if (!world) return;
+        return i.commandName === 'intel' ? await gdIntel(ctx, i, lang, world) : await gdPublic(ctx, i, lang, world);
+      }
     }
   } catch (e) {
-    log.error(`command /${i.commandName} failed`, e);
-    const payload = { embeds: [msg(t(lang, 'err.generic'), COLOR_ERR)] };
+    const known = e instanceof UserError;
+    if (!known) log.error(`command /${i.commandName} failed`, e);
+    const payload = { embeds: [msg(known ? t(lang, e.key, e.vars) : t(lang, 'err.generic'), COLOR_ERR)] };
     if (i.deferred || i.replied) await i.editReply(payload).catch(() => undefined);
     else await i.reply({ ...payload, flags: MessageFlags.Ephemeral }).catch(() => undefined);
   }

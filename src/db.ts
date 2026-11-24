@@ -15,6 +15,11 @@ import type { Lang } from './i18n.js';
 
 export interface GuildConfig { guildId: string; world: string | null; lang: Lang; verifiedRoleId: string | null }
 export interface Link { guildId: string; userId: string; world: string; playerId: number; verifiedAt: number }
+/** GrepoData City Indexer credentials for one guild. Secrets: never log access/refresh tokens. */
+export interface GdTokenRow {
+  guildId: string; accessToken: string; refreshToken: string | null; accessExp: number | null; refreshExp: number | null;
+  adminUserId: string | null; intelChannelId: string | null; source: 'command' | 'env'; alertStage: number; lastError: string | null; updatedAt: number;
+}
 export interface PendingVerification { guildId: string; userId: string; world: string; playerId: number; code: string; createdAt: number }
 
 const SCHEMA = `
@@ -26,6 +31,7 @@ CREATE TABLE IF NOT EXISTS links (guild_id TEXT NOT NULL, user_id TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS pending_verifications (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, world TEXT NOT NULL, player_id INTEGER NOT NULL, code TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id));
 CREATE TABLE IF NOT EXISTS world_state (world TEXT PRIMARY KEY, last_conquest_time INTEGER NOT NULL DEFAULT 0, updated_at INTEGER);
 CREATE TABLE IF NOT EXISTS file_cache (world TEXT NOT NULL, file TEXT NOT NULL, etag TEXT, last_modified TEXT, body BLOB NOT NULL, fetched_at INTEGER, PRIMARY KEY (world, file));
+CREATE TABLE IF NOT EXISTS gd_tokens (guild_id TEXT PRIMARY KEY, access_token TEXT NOT NULL, refresh_token TEXT, access_exp INTEGER, refresh_exp INTEGER, admin_user_id TEXT, intel_channel_id TEXT, source TEXT NOT NULL DEFAULT 'command', alert_stage INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at INTEGER);
 CREATE TABLE IF NOT EXISTS activity (world TEXT NOT NULL, player_id INTEGER NOT NULL, points INTEGER, abp INTEGER, dbp INTEGER, towns INTEGER, last_change_at INTEGER, first_seen_at INTEGER, PRIMARY KEY (world, player_id));
 `;
 
@@ -164,5 +170,38 @@ export class Store implements FileStore {
       for (const x of a.values()) ins.run(world, x.playerId, x.points, x.abp, x.dbp, x.towns, x.lastChangeAt, x.firstSeenAt);
       this.db.exec('COMMIT');
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+
+  // ---- GrepoData tokens (per guild)
+  getGdToken(guildId: string): GdTokenRow | null {
+    const r = this.db.prepare('SELECT * FROM gd_tokens WHERE guild_id = ?').get(guildId) as Record<string, unknown> | undefined;
+    return r ? this.rowToToken(r) : null;
+  }
+  allGdTokens(): GdTokenRow[] {
+    return (this.db.prepare('SELECT * FROM gd_tokens').all() as Record<string, unknown>[]).map(this.rowToToken);
+  }
+  private rowToToken = (r: Record<string, unknown>): GdTokenRow => ({
+    guildId: String(r.guild_id), accessToken: String(r.access_token), refreshToken: (r.refresh_token as string) ?? null,
+    accessExp: r.access_exp == null ? null : Number(r.access_exp), refreshExp: r.refresh_exp == null ? null : Number(r.refresh_exp),
+    adminUserId: (r.admin_user_id as string) ?? null, intelChannelId: (r.intel_channel_id as string) ?? null,
+    source: r.source === 'env' ? 'env' : 'command', alertStage: Number(r.alert_stage ?? 0), lastError: (r.last_error as string) ?? null, updatedAt: Number(r.updated_at ?? 0),
+  });
+  /** Insert or replace the token pair; keeps the intel channel; resets alert state. */
+  setGdToken(t: { guildId: string; accessToken: string; refreshToken: string | null; accessExp: number | null; refreshExp: number | null; adminUserId: string | null; source: 'command' | 'env' }) {
+    this.db.prepare(`INSERT INTO gd_tokens (guild_id, access_token, refresh_token, access_exp, refresh_exp, admin_user_id, source, alert_stage, last_error, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+      ON CONFLICT(guild_id) DO UPDATE SET access_token=excluded.access_token, refresh_token=excluded.refresh_token, access_exp=excluded.access_exp,
+        refresh_exp=excluded.refresh_exp, admin_user_id=COALESCE(excluded.admin_user_id, gd_tokens.admin_user_id), source=excluded.source,
+        alert_stage=0, last_error=NULL, updated_at=excluded.updated_at`)
+      .run(t.guildId, t.accessToken, t.refreshToken, t.accessExp, t.refreshExp, t.adminUserId, t.source, Date.now());
+  }
+  setGdIntelChannel(guildId: string, channelId: string | null): boolean {
+    return Number(this.db.prepare('UPDATE gd_tokens SET intel_channel_id = ? WHERE guild_id = ?').run(channelId, guildId).changes) > 0;
+  }
+  setGdAlert(guildId: string, stage: number, lastError: string | null = null) {
+    this.db.prepare('UPDATE gd_tokens SET alert_stage = ?, last_error = ? WHERE guild_id = ?').run(stage, lastError, guildId);
+  }
+  clearGdToken(guildId: string): boolean {
+    return Number(this.db.prepare('DELETE FROM gd_tokens WHERE guild_id = ?').run(guildId).changes) > 0;
   }
 }

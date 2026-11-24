@@ -45,8 +45,8 @@ export async function syncGuildRoles(ctx: Ctx, guild: Guild, userIds?: string[])
         player = snap.players.get(link.playerId) ?? null;
       }
       const { add, remove } = roleChanges(cfg, member.roles.cache.keys(), player);
-      if (add.length) await member.roles.add(add, 'GrepoDiscord alliance sync');
-      if (remove.length) await member.roles.remove(remove, 'GrepoDiscord alliance sync');
+      if (add.length) await member.roles.add(add, 'GrepoCord alliance sync');
+      if (remove.length) await member.roles.remove(remove, 'GrepoCord alliance sync');
       if (add.length || remove.length) changed++;
     } catch (e) {
       errors++;

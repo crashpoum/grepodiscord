@@ -7,7 +7,7 @@ export const config = {
   clientId: env.CLIENT_ID ?? '',
   /** If set, commands are registered to this guild only (instant), else globally. */
   devGuildId: env.DEV_GUILD_ID ?? '',
-  dbPath: env.DB_PATH ?? './data/grepodiscord.sqlite',
+  dbPath: env.DB_PATH ?? './data/grepocord.sqlite',
   markets: (env.MARKETS ?? 'gr,en').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
   defaultLang: (env.DEFAULT_LANG === 'el' ? 'el' : 'en') as 'en' | 'el',
   /** How often to poll official files (they change ~hourly; conditional requests make polling cheap). */
@@ -15,6 +15,17 @@ export const config = {
   /** Self-imposed GrepoData request budget (their fail2ban bans at 400 req/min; be far below). */
   grepodataRpm: num(env.GREPODATA_RPM, 30),
   grepodataBase: env.GREPODATA_BASE ?? 'https://api.grepodata.com',
-  userAgent: env.USER_AGENT ?? 'GrepoDiscord/1.0 (Discord bot; public data only)',
+  userAgent: env.USER_AGENT ?? 'GrepoCord/1.1 (Discord bot; public data only)',
+  /**
+   * GrepoData City Indexer access (optional). Tokens can also be set per server with /grepodata token.
+   * Env tokens are bound to ONE guild (GREPODATA_GUILD_ID, default DEV_GUILD_ID) so intel never leaks to other servers.
+   */
+  grepodataToken: env.GREPODATA_TOKEN ?? '',
+  grepodataRefreshToken: env.GREPODATA_REFRESH_TOKEN ?? '',
+  grepodataLogin: env.GREPODATA_LOGIN ?? '',
+  grepodataPassword: env.GREPODATA_PASSWORD ?? '',
+  grepodataGuildId: env.GREPODATA_GUILD_ID ?? env.DEV_GUILD_ID ?? '',
+  /** Discord user to alert about token expiry for env tokens (default: guild owner). */
+  grepodataAdminId: env.GREPODATA_ADMIN_ID ?? '',
   logLevel: env.LOG_LEVEL ?? 'info',
 };

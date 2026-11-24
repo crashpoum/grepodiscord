@@ -3,4 +3,4 @@ compiled
 data
 .env
 .git
-test/fixtures
+test

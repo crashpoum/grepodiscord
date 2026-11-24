@@ -191,3 +191,35 @@ ul.picker { list-style:none; padding:0; display:flex; flex-direction:column; gap
 .gr-u .unk { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:3px; border:1px dashed #a88d55; color:#8a7040; font-size:12px; font-weight:700; cursor:help; }
 @media (max-width:760px) { .ms-btn { max-width:120px; } .ms-pop { width:220px; } }
 .ms-list input[type=checkbox] { width:auto; margin:0; flex:none; }
+/* strategy drawing overlay */
+.mapmain canvas.drawlayer { pointer-events:none; cursor:crosshair; z-index:1; }
+.mapmain canvas.drawlayer.active { pointer-events:auto; }
+.mapmain canvas.drawlayer[data-tool=eraser] { cursor:not-allowed; }
+.mapmain canvas.drawlayer[data-tool=text] { cursor:text; }
+.drawbar { position:absolute; right:10px; top:122px; z-index:2; display:flex; flex-direction:column; align-items:flex-end; gap:4px; max-height:calc(100% - 190px); }
+.drawbar button { font:inherit; cursor:pointer; }
+.drawbar .dtog { width:34px; height:34px; border-radius:6px; border:1px solid #b89a5c; background:#f4ead0; color:#3b2a14; font-size:17px; line-height:1; padding:0; }
+.drawbar .dtog.on { background:#3b2a14; color:#ffd23f; }
+.drawbar .dvis:not(.on) { opacity:.55; text-decoration:line-through; }
+.dtools { display:flex; flex-direction:column; gap:4px; padding:6px; width:120px; background:rgba(244,234,208,.96); border:1px solid #b89a5c; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.35); overflow-y:auto; }
+.dtools[hidden] { display:none; }
+.dtools > button[data-tool] { display:inline-flex; }
+.dtools { flex-direction:row; flex-wrap:wrap; }
+.dtools > button[data-tool], .dtools > button[data-act=undo] { width:30px; height:30px; border-radius:5px; border:1px solid #c9b07a; background:#fffaf0; color:#3b2a14; font-size:15px; justify-content:center; align-items:center; padding:0; }
+.dtools > button.on { background:#3b2a14; color:#ffd23f; border-color:#3b2a14; }
+.dtools hr { width:100%; border:0; border-top:1px solid #d4bf8c; margin:2px 0; }
+.dcolors { display:flex; flex-wrap:wrap; gap:4px; }
+.dcolors button { width:20px; height:20px; border-radius:50%; border:2px solid #6b5530; background:var(--c); padding:0; }
+.dcolors button.on { outline:2px solid #3b2a14; outline-offset:1px; border-color:#fff; }
+.dwidths { display:flex; gap:4px; width:100%; }
+.dwidths button { flex:1; height:22px; border:1px solid #c9b07a; background:#fffaf0; border-radius:4px; display:flex; align-items:center; padding:0 4px; }
+.dwidths button i { display:block; width:100%; background:#3b2a14; border-radius:4px; }
+.dwidths button.on { background:#ffe9a8; border-color:#3b2a14; }
+.dtools select { width:100%; color:#3b2a14; font:inherit; font-size:12px; background:#fffaf0; border:1px solid #c9b07a; border-radius:4px; padding:2px; }
+.dtools .dwide { width:100%; font-size:12px; padding:3px 4px; border-radius:4px; border:1px solid #c9b07a; background:#fffaf0; color:#3b2a14; }
+.dtools .dwide.danger { color:#fff; background:#b3261e; border-color:#7d1a14; }
+.dtools .dwide.armed, .dtools .dwide.danger.armed { background:#ffd23f; color:#3b2a14; }
+.dcount { width:100%; font-size:11px; color:#6b5530; text-align:center; }
+.dmsg { max-width:200px; background:#3b2a14; color:#fff; font-size:12px; padding:5px 8px; border-radius:6px; }
+.dtext { position:absolute; z-index:3; min-width:180px; font:600 15px system-ui, sans-serif; background:rgba(20,30,40,.85); border:1px solid #ffd23f; border-radius:4px; padding:3px 6px; outline:none; }
+@media (max-width:760px) { .drawbar { top:auto; bottom:64px; max-height:calc(100% - 140px); } .dtools { width:104px; } }

@@ -74,6 +74,9 @@ CREATE INDEX IF NOT EXISTS reports_att ON reports(guild_id, att_town_id);
 CREATE TABLE IF NOT EXISTS newspapers (guild_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, world TEXT NOT NULL, weekday INTEGER NOT NULL DEFAULT 0, hour INTEGER NOT NULL DEFAULT 20,
   enabled INTEGER NOT NULL DEFAULT 1, last_sent_day TEXT, last_error TEXT, created_by TEXT, updated_at INTEGER);
 CREATE TABLE IF NOT EXISTS ai_usage (day TEXT NOT NULL, model TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, model));
+CREATE TABLE IF NOT EXISTS map_marks (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, world TEXT NOT NULL, user_id TEXT NOT NULL, author TEXT NOT NULL,
+  kind TEXT NOT NULL, color TEXT NOT NULL, width INTEGER NOT NULL, pts TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS map_marks_gw ON map_marks (guild_id, world, expires_at);
 `;
 
 export class Store implements FileStore {
@@ -84,6 +87,39 @@ export class Store implements FileStore {
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
   }
+
+  // ---- map strategy markup (temporary shapes, world coordinates; see src/web/marksCore.ts)
+  addMark(m: { guildId: string; world: string; userId: string; author: string; kind: string; color: string; width: number; pts: number[]; text: string; createdAt: number; expiresAt: number }): number {
+    const r = this.db.prepare('INSERT INTO map_marks (guild_id, world, user_id, author, kind, color, width, pts, text, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(m.guildId, m.world, m.userId, m.author, m.kind, m.color, m.width, JSON.stringify(m.pts), m.text, m.createdAt, m.expiresAt);
+    return Number(r.lastInsertRowid);
+  }
+  listMarks(guildId: string, world: string, now: number): { id: number; userId: string; author: string; kind: string; color: string; width: number; pts: number[]; text: string; createdAt: number; expiresAt: number }[] {
+    const rows = this.db.prepare('SELECT * FROM map_marks WHERE guild_id = ? AND world = ? AND expires_at > ? ORDER BY id').all(guildId, world, now) as Record<string, unknown>[];
+    return rows.map((r) => ({ id: Number(r.id), userId: String(r.user_id), author: String(r.author), kind: String(r.kind), color: String(r.color), width: Number(r.width),
+      pts: (() => { try { return JSON.parse(String(r.pts)) as number[]; } catch { return []; } })(), text: String(r.text ?? ''), createdAt: Number(r.created_at), expiresAt: Number(r.expires_at) }));
+  }
+  countMarks(guildId: string, world: string, now: number, userId?: string): number {
+    const r = userId
+      ? this.db.prepare('SELECT COUNT(*) AS n FROM map_marks WHERE guild_id = ? AND world = ? AND expires_at > ? AND user_id = ?').get(guildId, world, now, userId)
+      : this.db.prepare('SELECT COUNT(*) AS n FROM map_marks WHERE guild_id = ? AND world = ? AND expires_at > ?').get(guildId, world, now);
+    return Number((r as { n: number }).n);
+  }
+  /** Delete one shape; `userId` null = any author (managers). */
+  deleteMark(guildId: string, world: string, id: number, userId: string | null): boolean {
+    const r = userId
+      ? this.db.prepare('DELETE FROM map_marks WHERE id = ? AND guild_id = ? AND world = ? AND user_id = ?').run(id, guildId, world, userId)
+      : this.db.prepare('DELETE FROM map_marks WHERE id = ? AND guild_id = ? AND world = ?').run(id, guildId, world);
+    return Number(r.changes) > 0;
+  }
+  /** Clear the guild+world's shapes; `userId` = only that author's. Returns how many were removed. */
+  clearMarks(guildId: string, world: string, userId: string | null): number {
+    const r = userId
+      ? this.db.prepare('DELETE FROM map_marks WHERE guild_id = ? AND world = ? AND user_id = ?').run(guildId, world, userId)
+      : this.db.prepare('DELETE FROM map_marks WHERE guild_id = ? AND world = ?').run(guildId, world);
+    return Number(r.changes);
+  }
+  purgeExpiredMarks(now: number): number { return Number(this.db.prepare('DELETE FROM map_marks WHERE expires_at <= ?').run(now).changes); }
 
   // ---- guild config
   getGuild(guildId: string, defaultLang: Lang = 'en'): GuildConfig {

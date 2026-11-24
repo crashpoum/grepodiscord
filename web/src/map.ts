@@ -43,7 +43,12 @@ export class MapView {
   private commands: LiveCommand[] = [];
   private targets = new Map<number, number>();
   private showCmds = false; private showTargets = true; private showLabels = true;
-  private raf = 0; private dpr = 1;
+  private raf = 0; dpr = 1;
+  /** Called at the end of every map paint (same frame): the drawing overlay re-projects its shapes. */
+  afterPaint: (() => void) | null = null;
+  /** Hover hook for overlays: tooltip HTML for a screen point, or null to fall through to towns. */
+  hoverExtra: ((sx: number, sy: number) => string | null) | null = null;
+  get scale() { return this.view.scale; }
   private tiles = new Map<string, HTMLCanvasElement | OffscreenCanvas>();
   private pointers = new Map<number, { x: number; y: number }>();
   private labelsA: { id: number; x: number; y: number; n: number }[] = [];
@@ -124,11 +129,11 @@ export class MapView {
     if (!this.view.scale) this.view.scale = Math.min(r.width, r.height) / this.fitSpan;
     this.draw();
   }
-  private get w() { return this.canvas.width / this.dpr; }
-  private get h() { return this.canvas.height / this.dpr; }
-  private toScreen(x: number, y: number): [number, number] { return [(x - this.view.cx) * this.view.scale + this.w / 2, (y - this.view.cy) * this.view.scale + this.h / 2]; }
-  private toWorld(sx: number, sy: number): [number, number] { return [(sx - this.w / 2) / this.view.scale + this.view.cx, (sy - this.h / 2) / this.view.scale + this.view.cy]; }
-  private zoomAt(sx: number, sy: number, f: number) {
+  get w() { return this.canvas.width / this.dpr; }
+  get h() { return this.canvas.height / this.dpr; }
+  toScreen(x: number, y: number): [number, number] { return [(x - this.view.cx) * this.view.scale + this.w / 2, (y - this.view.cy) * this.view.scale + this.h / 2]; }
+  toWorld(sx: number, sy: number): [number, number] { return [(sx - this.w / 2) / this.view.scale + this.view.cx, (sy - this.h / 2) / this.view.scale + this.view.cy]; }
+  zoomAt(sx: number, sy: number, f: number) {
     const [wx, wy] = this.toWorld(sx, sy);
     this.view.scale = Math.max(0.4, Math.min(80, this.view.scale * f));
     const [nx, ny] = this.toWorld(sx, sy);
@@ -314,7 +319,13 @@ export class MapView {
     this.renderSide(recent);
     this.perf.push(performance.now() - t0);
     if (this.perf.length > 240) this.perf.shift();
+    this.afterPaint?.();
     if (missing) this.draw(); // more tiles to render next frame
+  }
+  /** Show arbitrary (already escaped) tooltip HTML at a screen point. */
+  tipHtml(html: string, x: number, y: number) {
+    this.tip.innerHTML = html; this.tip.style.display = 'block';
+    this.tip.style.left = `${Math.min(x + 14, this.w - 240)}px`; this.tip.style.top = `${Math.min(y + 14, this.h - 80)}px`;
   }
   private paintLabels(visible: number[], r: number) {
     const c = this.c, sc = this.view.scale;
@@ -545,7 +556,7 @@ export class MapView {
         this.view.cx = drag.cx - (e.offsetX - drag.x) / this.view.scale; this.view.cy = drag.cy - (e.offsetY - drag.y) / this.view.scale; this.tip.style.display = 'none'; return this.draw();
       }
       hover = { x: e.offsetX, y: e.offsetY };
-      if (!hoverRaf) hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; if (!hover) return; const tw = this.hit(hover.x, hover.y); if (tw) this.showTip(tw, hover.x, hover.y); else this.tip.style.display = 'none'; });
+      if (!hoverRaf) hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; if (!hover) return; const ex = this.hoverExtra?.(hover.x, hover.y); if (ex) return this.tipHtml(ex, hover.x, hover.y); const tw = this.hit(hover.x, hover.y); if (tw) this.showTip(tw, hover.x, hover.y); else this.tip.style.display = 'none'; });
     });
     const up = (e: PointerEvent) => {
       if (drag && !drag.moved && this.pointers.size === 1) { const tw = this.hit(e.offsetX, e.offsetY); this.selected = tw ? tw.id : null; this.sideKey = ''; if (tw) this.root.querySelector('.mapwrap')!.classList.add('side-open'); this.draw(); }

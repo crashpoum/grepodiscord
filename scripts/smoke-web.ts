@@ -5,6 +5,7 @@ import { Store } from '../src/db.js';
 import { WorldManager } from '../src/refresh.js';
 import { GrepoDataClient } from '../src/data/grepodata.js';
 import { createWebApp } from '../src/web/server.js';
+import { townXY } from '../web/src/geo.js';
 import { issueSession } from '../src/web/auth.js';
 
 const W = process.env.SMOKE_WORLD ?? 'gr125';
@@ -46,7 +47,30 @@ const fakeGd = (async (u: string) => {
   return j({ success: false });
 }) as typeof fetch;
 const ctx = { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fakeGd) };
-const app = createWebApp({ ctx, guilds: { has: () => true, name: () => 'Smoke server' }, secret: 's'.repeat(32) });
+// Strategy drawings: a few demo shapes near our towns (+ SMOKE_MARKS random ones for perf checks).
+{
+  const xy = (t: { islandX: number; islandY: number; slot: number }) => townXY(t.islandX, t.islandY, t.slot);
+  const c = ours.reduce((a, t) => { const [x, y] = xy(t); return [a[0] + x / ours.length, a[1] + y / ours.length]; }, [0, 0]);
+  const e = xy(them[0]), o = xy(ours[0]), o2 = xy(ours[Math.min(5, ours.length - 1)]);
+  const base = { guildId: 'G1', world: W, createdAt: Date.now(), expiresAt: Date.now() + 86400_000 };
+  const add = (userId: string, author: string, kind: string, color: string, width: number, pts: number[], text = '') => store.addMark({ ...base, userId, author, kind, color, width, pts, text });
+  add('U2', 'Leonidas_GR', 'arrow', '#ff3b3b', 4, [e[0], e[1], o[0], o[1]]);
+  add('U2', 'Leonidas_GR', 'circle', '#ff3b3b', 4, [e[0] - 4, e[1] - 4, e[0] + 4, e[1] + 4]);
+  add('U1', 'Smoke', 'arrow', '#3d8bff', 7, [o2[0], o2[1], (o2[0] + e[0]) / 2, (o2[1] + e[1]) / 2]);
+  add('U1', 'Smoke', 'rect', '#ffd23f', 2, [c[0] - 12, c[1] - 9, c[0] + 12, c[1] + 9]);
+  add('U3', 'Ariadne', 'text', '#ffd23f', 4, [o[0] + 3, o[1] - 3], 'Wave 1 lands 21:00, CS behind');
+  add('U2', 'Leonidas_GR', 'text', '#ff3b3b', 4, [e[0] + 5, e[1] + 6], 'Enemy stack (~400 hops)');
+  add('U3', 'Ariadne', 'pen', '#7dff6b', 4, Array.from({ length: 30 }, (_, i) => [c[0] - 20 + i * 1.2, c[1] + 14 + Math.sin(i / 3) * 2]).flat());
+  add('U1', 'Smoke', 'circle', '#22c7c7', 4, [o2[0] - 6, o2[1] - 4, o2[0] + 6, o2[1] + 4]);
+  const R = Number(process.env.SMOKE_MARKS ?? 0);
+  const kinds = ['pen', 'arrow', 'circle', 'rect', 'line', 'text'];
+  for (let i = 0; i < R; i++) {
+    const k = kinds[i % kinds.length], x = c[0] + ((i * 37) % 120) - 60, y = c[1] + ((i * 53) % 100) - 50;
+    const pts = k === 'pen' ? Array.from({ length: 60 }, (_, j) => [x + j * 0.3, y + Math.sin(j / 4) * 2]).flat() : k === 'text' ? [x, y] : [x, y, x + 5 + (i % 7), y + 3 + (i % 5)];
+    add(`R${i % 9}`, `Player${i % 9}`, k, ['#ff3b3b', '#ffd23f', '#3d8bff', '#22c7c7'][i % 4], 4, pts, k === 'text' ? `note ${i}` : '');
+  }
+}
+const app = createWebApp({ ctx, guilds: { has: () => true, name: () => 'Smoke server', manager: async () => true }, secret: 's'.repeat(32) });
 http.createServer(app.handler).listen(PORT, () => {
   const tok = issueSession('s'.repeat(32), { u: 'U1', g: 'G1', n: 'Smoke' });
   console.log(`LIVE http://localhost:${PORT}/go/live?t=${tok}`);

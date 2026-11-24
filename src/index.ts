@@ -1,5 +1,5 @@
 /** Bot entry point. */
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { Client, Events, GatewayIntentBits, PermissionFlagsBits } from 'discord.js';
 import { config } from './config.js';
 import { log } from './log.js';
 import { Store } from './db.js';
@@ -46,6 +46,12 @@ const web = config.webEnabled
       const g = client.guilds.cache.get(guildId);
       if (!g) return 'unknown';
       try { await g.members.fetch({ user: userId, force: false }); return 'yes'; } catch (e) { return discordNo(e, [10007, 10013]) ? 'no' : 'unknown'; }
+    },
+    manager: async (guildId, userId) => {
+      const g = client.guilds.cache.get(guildId);
+      if (!g) return false;
+      if (g.ownerId === userId) return true;
+      try { const m = await g.members.fetch({ user: userId, force: false }); return m.permissions.has(PermissionFlagsBits.ManageGuild); } catch { return false; }
     },
     diag: () => `client ${client.isReady() ? 'ready' : 'NOT ready'}, ${client.guilds.cache.size} guild(s) cached`,
   })

@@ -23,6 +23,7 @@ import { t, type Lang } from '../i18n.js';
 import { guildSides } from '../bot/insights.js';
 import { IslandCache } from './islands.js';
 import { GpCdn } from './gpcdn.js';
+import { MarksService, type MarksResult } from './marks.js';
 import { mapSides } from './mapData.js';
 import { unitName } from '../bot/warPoster.js';
 import { UNIT_EN } from '../planner.js';
@@ -43,9 +44,11 @@ export interface BotGuilds {
   name(id: string): string | null;
   check?(id: string): Promise<Presence>;
   member?(guildId: string, userId: string): Promise<Presence>;
+  /** Whether the user may manage the server (Manage Server permission): may clear everyone's map drawings. */
+  manager?(guildId: string, userId: string): Promise<boolean>;
   diag?(): string;
 }
-export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; gpcdn?: GpCdn; now?: () => number }
+export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; gpcdn?: GpCdn; marks?: MarksService; now?: () => number }
 
 type AuthFail = 'none' | 'bad' | 'expired' | 'guild';
 const AUTH_KEY = { none: 'web.err.login', bad: 'web.err.badLink', expired: 'web.err.auth', guild: 'web.err.botGone' } as const;
@@ -132,6 +135,7 @@ export function createWebApp(deps: WebDeps) {
   hub = deps.hub ?? new LiveHub(ctx, async (g, w) => { const sd = sidesOf(g, await ctx.worlds.ensure(w)); return [...sd.ours, ...sd.allies]; });
   const islands = deps.islands ?? new IslandCache(fetchImpl, now);
   const gpcdn = deps.gpcdn ?? new GpCdn(fetchImpl, now);
+  const marks = deps.marks ?? new MarksService(ctx.store, (g, u) => guilds.manager?.(g, u) ?? Promise.resolve(false), now);
   const staticDir = deps.staticDir === undefined ? findStaticDir() : deps.staticDir;
   const limiter = new IpLimiter(20, now);
   const mapCache = new Map<string, { key: unknown; at: number; body: Buffer; gz: Buffer; etag: string; sides: string }>();
@@ -350,7 +354,10 @@ export function createWebApp(deps: WebDeps) {
 
     // ---- Data API
     if (p.startsWith('/api/')) {
-      if (req.method !== 'GET') return json(res, 405, { error: 'method' });
+      const isMarksWrite = req.method === 'POST' && /^\/api\/marks(?:\/delete|\/clear)?$/.test(p);
+      if (req.method !== 'GET' && !isMarksWrite) return json(res, 405, { error: 'method' });
+      // Writes need a custom header: a cross-site form/page can't send it without a CORS preflight we never grant (CSRF).
+      if (isMarksWrite && req.headers['x-gc'] !== '1') return json(res, 403, { error: 'missing header' });
       const sr = await session(req);
       if (!('s' in sr)) return json(res, 401, { error: t(lang0, sr.why === 'none' && !loginOk() ? 'web.freshLink' : AUTH_KEY[sr.why]), reason: sr.why });
       const s = sr.s;
@@ -363,6 +370,22 @@ export function createWebApp(deps: WebDeps) {
       }
       if (p === '/api/live') return json(res, 200, await hub.view(s.g, lang), req);
       if (p === '/api/map') return mapPayload(s, req, res);
+      if (p === '/api/marks' || p.startsWith('/api/marks/')) {
+        const world = ctx.store.getGuild(s.g, config.defaultLang).world;
+        if (!world) return json(res, 409, { error: t(lang, 'web.marks.noWorld') });
+        const out = (r: MarksResult) => ('err' in r ? json(res, r.status, { error: t(lang, r.err, r.vars ?? {}) }) : json(res, r.status, r.body));
+        if (req.method === 'GET' && p === '/api/marks') {
+          const since = url.searchParams.has('rev') ? Number(url.searchParams.get('rev')) : undefined;
+          const v = await marks.view(s.g, world, s.u, since);
+          if (!v) { res.writeHead(204, { 'Cache-Control': 'no-store' }); return void res.end(); }
+          return json(res, 200, v);
+        }
+        let body: Record<string, unknown>;
+        try { body = (await readBody(req, 32_768)) as Record<string, unknown>; } catch { return json(res, 413, { error: t(lang, 'web.marks.invalid') }); }
+        if (p === '/api/marks') return out(marks.create(s.g, world, s.u, s.n ?? '', body));
+        if (p === '/api/marks/delete') return out(await marks.remove(s.g, world, s.u, body.id));
+        if (p === '/api/marks/clear') return out(await marks.clear(s.g, world, s.u, body.all === true));
+      }
       if (p === '/api/islands') return islandsPayload(s, req, res);
       return json(res, 404, { error: 'not found' });
     }
@@ -377,12 +400,13 @@ export function createWebApp(deps: WebDeps) {
       else res.end();
     });
   };
-  return { handler, hub };
+  return { handler, hub, marks };
 }
 
 export function startWebServer(ctx: Ctx, guilds: BotGuilds) {
   const secret = webSecret(ctx.store);
   const app = createWebApp({ ctx, guilds, secret });
+  app.marks.start(); // hourly-ish purge of expired map drawings
   const stopWatch = config.activityClientId ? watchActivityApp() : () => undefined;
   const server = http.createServer(app.handler);
   server.requestTimeout = 30_000;
@@ -392,7 +416,7 @@ export function startWebServer(ctx: Ctx, guilds: BotGuilds) {
     log.info(`web: live window on :${config.webPort}${config.publicUrl ? ` (public ${config.publicUrl})` : ''}; Activity app ${config.activityClientId ? 'configured' : 'not configured'}${findStaticDir() ? '' : ' — WARNING: web bundle missing'}`);
   });
   server.on('error', (e) => log.error('web server error', e));
-  return { secret, close: () => { stopWatch(); app.hub.stop(); server.close(); } };
+  return { secret, close: () => { stopWatch(); app.hub.stop(); app.marks.stop(); server.close(); } };
 }
 
 /**

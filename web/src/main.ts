@@ -6,6 +6,7 @@ import { wt, type WebKey, type WebLang } from '../../src/web/strings.js';
 import type { LiveView, LiveCommand, MapPayload } from '../../src/web/types.js';
 import { MapView } from './map.js';
 import { LiveScreen } from './liveView.js';
+import { DrawLayer } from './draw.js';
 
 declare global { interface Window { __GC?: { clientId: string; oauth: boolean; lang: WebLang } } }
 interface Me { user: string | null; guildId: string; guild: string | null; world: string | null; lang: WebLang; me: number | null; exp: number; units: Record<string, string>; error: string | null }
@@ -27,6 +28,14 @@ async function apiRes(path: string, cache: RequestCache): Promise<Response> {
   const res = await fetch(path, { credentials: 'same-origin', cache, headers: session ? { Authorization: `Bearer ${session}` } : {} });
   if (res.status === 401) { const body = (await res.json().catch(() => ({}))) as { error?: string; reason?: string }; throw new AuthError(body.error || L('expired'), body.reason); }
   return res;
+}
+/** JSON POST for the map drawings (custom header = CSRF guard; Bearer inside the Activity, cookie in the browser). */
+async function apiPost(path: string, body: unknown): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
+  const res = await fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json', 'X-GC': '1', ...(session ? { Authorization: `Bearer ${session}` } : {}) } });
+  const b = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (res.status === 401) throw new AuthError(String(b.error || L('expired')), String(b.reason ?? 'expired'));
+  return { ok: res.ok, status: res.status, body: b };
 }
 /** `cache`: live data is always fresh (no-store); the map revalidates with its ETag (no-cache → 304 when unchanged). */
 async function api<T>(path: string, cache: RequestCache = 'no-store'): Promise<T> {
@@ -79,6 +88,7 @@ let me: Me;
 let liveTimer: number | undefined;
 let tickTimer: number | undefined;
 let mapView: MapView | null = null;
+let drawLayer: DrawLayer | null = null;
 let lastLive: LiveView | null = null;
 let liveFilter: 'all' | 'in' | 'out' = 'all';
 
@@ -96,7 +106,7 @@ function renderShell() {
 function switchTab(t: 'live' | 'map') {
   tab = t;
   if (!inActivity) history.replaceState(null, '', `/${t}`);
-  mapView?.destroy(); mapView = null;
+  drawLayer?.destroy(); drawLayer = null; mapView?.destroy(); mapView = null;
   liveScreen?.destroy(); liveScreen = null;
   renderShell();
   if (t === 'live') void startLive(); else void startMap();
@@ -146,6 +156,9 @@ async function startMap() {
     v.innerHTML = '';
     v.style.overflow = 'hidden';
     mapView = new MapView(v, data, { L, esc, lang, me: me.me, islands, onWantCommands: (on) => { if (on) void pollLive(); } });
+    drawLayer?.destroy();
+    drawLayer = new DrawLayer(mapView, v.querySelector('.mapmain')!, { L, esc, get: (p) => apiRes(p, 'no-store'), post: apiPost });
+    (window as unknown as { __gcDraw?: DrawLayer }).__gcDraw = drawLayer;
     if (!lastLive) void pollLive();
     if (lastLive) mapView.setCommands(lastLive.commands);
   } catch (e) { fail(e); }
@@ -177,7 +190,7 @@ async function boot() {
     loop();
     document.addEventListener('visibilitychange', () => { if (!document.hidden && tab === 'live') void pollLive(); });
     // ONE 1 s timer for every countdown/clock on screen.
-    tickTimer = window.setInterval(() => { if (!document.hidden) liveScreen?.tick(); }, 1000);
+    tickTimer = window.setInterval(() => { if (document.hidden) return; liveScreen?.tick(); if (tab === 'map') drawLayer?.maybePoll(); }, 1000);
     window.addEventListener('beforeunload', () => { clearTimeout(liveTimer); clearInterval(tickTimer); });
   } catch (e) { fail(e); }
 }

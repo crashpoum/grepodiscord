@@ -22,6 +22,7 @@ import { watchActivityApp } from './activityCheck.js';
 import { log } from '../log.js';
 import { t, type Lang } from '../i18n.js';
 import { guildSides } from '../bot/insights.js';
+import { getWorldInfo } from '../data/worldInfo.js';
 import { IslandCache } from './islands.js';
 import { GpCdn } from './gpcdn.js';
 import { MarksService, type MarksResult } from './marks.js';
@@ -237,7 +238,9 @@ export function createWebApp(deps: WebDeps) {
     if (!c || c.key !== snap || c.sides !== sk || now() - c.at > 5 * 60_000) {
       const top = [...snap.alliances.values()].sort((a, b) => b.points - a.points).slice(0, 12).map((a) => a.id);
       const ids = [...new Set([...sides.ours, ...sides.allies, ...sides.enemies, ...top])];
-      const body = Buffer.from(JSON.stringify(buildMapPayload(snap, sides, { now: now(), history: ctx.store.allianceTownsHistory(world, ids) })));
+      const wi = await getWorldInfo(world, ctx.store, fetchImpl).catch(() => null);
+      const speeds = wi ? { world: wi.worldSpeed, unit: wi.unitSpeed, units: Object.fromEntries([...wi.units.entries()].map(([id, u]) => [id, { speed: u.speed, naval: u.naval, flying: u.flying }])) } : undefined;
+      const body = Buffer.from(JSON.stringify(buildMapPayload(snap, sides, { now: now(), history: ctx.store.allianceTownsHistory(world, ids), speeds })));
       c = { key: snap, at: now(), body, gz: gzipSync(body, { level: 9 }), etag: `"m${createHash('sha1').update(body).digest('base64url').slice(0, 16)}"`, sides: sk };
       mapCache.set(key, c);
       if (mapCache.size > 200) mapCache.delete(mapCache.keys().next().value!);

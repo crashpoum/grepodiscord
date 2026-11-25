@@ -9,6 +9,8 @@ import type { LiveCommand, MapPayload } from '../../src/web/types.js';
 import type { WebKey, WebLang } from '../../src/web/strings.js';
 import type { TownPanel } from '../../src/web/townPanel.js';
 import { fmtAt, typeChip, unitsAny } from './ui.js';
+import { fallbackSpeeds, fmtHms, mapRangeRadius, mapTownTravel, parseMapQuery, RULER_UNIT_ORDER, type MapSpeeds, type TravelMods } from '../../src/web/travel.js';
+import { injectSprite, loadOfficialIcons, unitIcon } from './icons.js';
 import { allianceColor, decodeIslands, Grid, ISLAND_R, islandClass, islandShape, oceanOf, ownerAtTime, SIDE_COLOR, sideOf, townXY, type Hist, type Islands, type Side } from './geo.js';
 
 interface Opts { L: (k: WebKey, v?: Record<string, string | number>) => string; esc: (s: unknown) => string; lang: WebLang; me: number | null; onWantCommands: (on: boolean) => void; islands: ArrayBuffer | null;
@@ -42,7 +44,17 @@ export class MapView {
   private t: number; private tMin: number; private tMax: number;
   private windowDays = 7;
   private playing: number | undefined;
-  private highlight: { kind: 'a' | 'p' | 't'; id: number } | null = null;
+  private highlight: { kind: 'a' | 'p' | 't' | 'o' | 'xy'; id: number; x?: number; y?: number } | null = null;
+  private speeds: MapSpeeds;
+  private rulerMode = false;
+  private rulerA: number | null = null;
+  private rulerB: number | null = null;
+  private mods: TravelMods = { meteorology: false, cartography: false, lighthouse: false, boost: 0, transport: 'big_transporter' };
+  private rangePick = false;
+  private rangeOrigin: number | null = null;
+  private rangeUnit = 'attack_ship';
+  private rangeMin = 60;
+  private arrowSegs: { x1: number; y1: number; cx: number; cy: number; x2: number; y2: number; cmd: LiveCommand }[] = [];
   private selected: number | null = null;
   private commands: LiveCommand[] = [];
   private targets = new Map<number, number>();
@@ -80,13 +92,18 @@ export class MapView {
     const nowS = Math.floor(data.generatedAt / 1000);
     this.tMax = nowS; this.t = nowS;
     this.tMin = data.conquests.length ? Math.min(data.conquests[0][0], nowS - DAY) : nowS - 30 * DAY;
+    this.speeds = data.speeds ?? fallbackSpeeds();
+    injectSprite();
+    void loadOfficialIcons().then((ok) => { if (ok) { this.sideKey = ''; this.draw(); } });
     this.computeAllianceLabels();
     this.fitView();
 
     const { L, esc } = o;
     root.innerHTML = `<div class="mapwrap"><div class="mapmain"><canvas></canvas><div class="tip"></div>
       <div class="topbar"><div class="seg"><button class="on" data-mode="sides">${esc(L('colorSides'))}</button><button data-mode="alliances">${esc(L('colorAlliances'))}</button></div>
-        <div class="searchbox"><input type="search" placeholder="${esc(L('searchHint'))}" autocomplete="off"><ul class="sugg" hidden></ul></div>
+        <div class="searchbox"><input type="search" placeholder="${esc(L('mapSearchPlaceholder'))}" autocomplete="off"><ul class="sugg" hidden></ul></div>
+        <button class="gbtn" data-ruler title="${esc(L('mapRulerHint'))}">📏 ${esc(L('mapRuler'))}</button>
+        <button class="gbtn" data-hl-clear hidden>✕ ${esc(L('mapHighlightClear'))}</button>
         <button class="gbtn side-toggle">☰ ${esc(L('legend'))}</button></div>
       <div class="zoom"><button data-z="1">+</button><button data-z="-1">−</button></div>
       <div class="overlay"><button class="gbtn" data-play>▶ ${esc(L('play'))}</button><input type="range" min="0" max="1000" value="1000"><span class="when"></span>
@@ -271,8 +288,16 @@ export class MapView {
       const [sx, sy] = this.toScreen(gx, gy);
       c.fillText(String(oceanOf(gx, gy)).padStart(2, '0'), sx + 6, sy + 6);
     }
+    const hl = this.highlight;
     // 2b. attack heatmap: conquests in the replay window + live incoming targets (additive soft blobs)
     if (this.showHeat) this.paintHeat(wx0, wy0, wx1, wy1, sc);
+    if (hl?.kind === 'o') {
+      const ox = Math.floor(hl.id / 10) * 100, oy = (hl.id % 10) * 100;
+      const [sx0, sy0] = this.toScreen(ox, oy), [sx1, sy1] = this.toScreen(ox + 100, oy + 100);
+      c.fillStyle = 'rgba(255, 225, 77, 0.08)'; c.fillRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
+      c.strokeStyle = '#ffe14d'; c.lineWidth = 2.5; c.setLineDash([8, 6]); c.strokeRect(sx0, sy0, sx1 - sx0, sy1 - sy0); c.setLineDash([]);
+    }
+    if (this.rangeOrigin !== null) this.paintRangeRing();
     // 3. towns (batched per colour)
     const r = Math.max(1.6, Math.min(4.5, sc * 0.08));
     const byCol = new Map<string, Path2D>();
@@ -292,13 +317,12 @@ export class MapView {
     for (const [col, p] of byCol) { c.fillStyle = col; c.fill(p); }
     if (r >= 2.2) { c.strokeStyle = 'rgba(0,0,0,.55)'; c.lineWidth = 1; for (const p of byCol.values()) c.stroke(p); }
     // 4. highlights: me, search, selection, live targets
-    const hl = this.highlight;
     const ring = (tw: Town, col: string, extra = 3, lw = 2) => { const [sx, sy] = this.toScreen(tw.x, tw.y); c.strokeStyle = col; c.lineWidth = lw; c.beginPath(); c.arc(sx, sy, r + extra, 0, Math.PI * 2); c.stroke(); };
     for (const i of visible) {
       const tw = this.towns[i];
       const own = hl || this.o.me ? this.ownerAt(tw) : null;
       if (this.o.me && own && own.p === this.o.me) ring(tw, '#ffe14d', 2.5, 1.5);
-      if (hl && own && ((hl.kind === 'a' && own.a === hl.id) || (hl.kind === 'p' && own.p === hl.id) || (hl.kind === 't' && tw.id === hl.id))) ring(tw, '#ffffff', 4, 2);
+      if (hl && ((hl.kind === 'o' && oceanOf(tw.ix, tw.iy) === hl.id) || (own && ((hl.kind === 'a' && own.a === hl.id) || (hl.kind === 'p' && own.p === hl.id) || (hl.kind === 't' && tw.id === hl.id))))) ring(tw, '#ffffff', 4, 2);
       if (this.showTargets && this.targets.has(tw.id)) ring(tw, '#ff9f1a', 5 + Math.min(6, this.targets.get(tw.id)!), 2.5);
       if (this.selected === tw.id) ring(tw, '#ffffff', 7, 1.5);
     }
@@ -318,19 +342,57 @@ export class MapView {
       ring(tw, this.mode === 'sides' ? (ns === 'own' || ns === 'ally' || ns === 'enemy' ? SIDE_COLOR[ns] : os === 'own' || os === 'ally' ? '#ffffff' : '#e8dcc0') : allianceColor(q[4] || 1), 3 + 5 * (1 - age), involved ? 2 : 1);
       c.globalAlpha = 1;
     }
-    // 6. live commands
+    // 6. live movement arrows
+    this.arrowSegs = [];
     if (this.showCmds) {
       const nowS = Date.now() / 1000;
+      const seenPair = new Map<string, number>();
       for (const cmd of this.commands) {
         const a = cmd.src.townId ? this.townById.get(cmd.src.townId) : undefined, b = cmd.trg.townId ? this.townById.get(cmd.trg.townId) : undefined;
-        if (!a || !b) continue;
+        if (!a || !b || a.id === b.id) continue;
         const [x1, y1] = this.toScreen(a.x, a.y), [x2, y2] = this.toScreen(b.x, b.y);
-        c.strokeStyle = cmd.side === 'in' ? SIDE_COLOR.enemy : cmd.side === 'out' ? '#4ade80' : '#d0d0d0';
-        c.globalAlpha = cmd.arrival - nowS < 900 ? 1 : 0.6; c.lineWidth = 1.6; c.setLineDash(/support/i.test(cmd.type) ? [5, 4] : []);
-        c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
-        c.setLineDash([]); c.globalAlpha = 1;
+        if (Math.max(x1, x2) < -40 || Math.min(x1, x2) > w + 40 || Math.max(y1, y2) < -40 || Math.min(y1, y2) > h + 40) continue;
+        const pk = a.id < b.id ? `${a.id}:${b.id}` : `${b.id}:${a.id}`;
+        const idx = seenPair.get(pk) ?? 0; seenPair.set(pk, idx + 1);
+        const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+        const dir = (a.id < b.id ? 1 : -1) * (idx % 2 === 0 ? 1 : -1);
+        const curve = Math.min(34, len * 0.16) * (1 + Math.floor(idx / 2) * 0.45) * dir;
+        const nx = -dy / len, ny = dx / len;
+        const cx = (x1 + x2) / 2 + nx * curve, cy = (y1 + y2) / 2 + ny * curve;
+        const urgent = cmd.arrival - nowS < 900;
+        const isSup = /support/i.test(cmd.type);
+        const col = cmd.side === 'in' ? (isSup ? '#22c7c7' : SIDE_COLOR.enemy) : cmd.side === 'out' ? '#4ade80' : '#cbd5e1';
+        c.strokeStyle = col; c.fillStyle = col;
+        c.globalAlpha = cmd.ret ? 0.5 : urgent ? 0.95 : 0.72;
+        c.lineWidth = urgent && !cmd.ret ? 2.3 : 1.6;
+        c.setLineDash(cmd.ret || isSup ? [5, 4] : []);
+        c.beginPath(); c.moveTo(x1, y1); c.quadraticCurveTo(cx, cy, x2, y2); c.stroke();
+        c.setLineDash([]);
+        // Arrowhead near target town
+        const tx = x2 - cx, ty = y2 - cy, tl = Math.hypot(tx, ty) || 1;
+        const ux = tx / tl, uy = ty / tl, tipX = x2 - ux * (r + 3), tipY = y2 - uy * (r + 3), ah = urgent ? 8 : 6.5;
+        c.beginPath(); c.moveTo(tipX, tipY);
+        c.lineTo(tipX - ux * ah - uy * ah * 0.55, tipY - uy * ah + ux * ah * 0.55);
+        c.lineTo(tipX - ux * ah + uy * ah * 0.55, tipY - uy * ah - ux * ah * 0.55);
+        c.closePath(); c.fill();
+        // Progress marker when departure time is known
+        if (cmd.started && cmd.arrival > cmd.started && nowS >= cmd.started && nowS <= cmd.arrival) {
+          const p = (nowS - cmd.started) / (cmd.arrival - cmd.started);
+          const q = 1 - p;
+          const px = q * q * x1 + 2 * q * p * cx + p * p * x2;
+          const py = q * q * y1 + 2 * q * p * cy + p * p * y2;
+          c.beginPath(); c.arc(px, py, 3, 0, Math.PI * 2); c.fill();
+        }
+        this.arrowSegs.push({ x1, y1, cx, cy, x2, y2, cmd });
+        c.globalAlpha = 1;
       }
     }
+    if (hl?.kind === 'xy' && hl.x !== undefined && hl.y !== undefined) {
+      const [sx, sy] = this.toScreen(hl.x, hl.y);
+      c.strokeStyle = '#ffe14d'; c.lineWidth = 2;
+      c.beginPath(); c.arc(sx, sy, 12, 0, Math.PI * 2); c.moveTo(sx - 18, sy); c.lineTo(sx + 18, sy); c.moveTo(sx, sy - 18); c.lineTo(sx, sy + 18); c.stroke();
+    }
+    if (this.rulerA !== null) this.paintRuler();
     // 7. labels (level of detail)
     if (this.showLabels) this.paintLabels(visible, r);
     this.whenEl.textContent = this.t >= this.tMax ? this.o.L('now') : new Date(this.t * 1000).toLocaleString(this.o.lang === 'el' ? 'el-GR' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' });
@@ -460,10 +522,76 @@ export class MapView {
     return this.recentCache.list;
   }
 
+  private paintRangeRing() {
+    const orig = this.rangeOrigin !== null ? this.townById.get(this.rangeOrigin) : undefined;
+    if (!orig) return;
+    const rad = mapRangeRadius(this.rangeUnit, this.rangeMin * 60, this.speeds, this.mods);
+    const [sx, sy] = this.toScreen(orig.x, orig.y);
+    const c = this.c;
+    if (rad > 0) {
+      const rPx = rad * this.view.scale;
+      c.save();
+      c.fillStyle = 'rgba(255, 190, 50, 0.08)';
+      c.beginPath(); c.arc(sx, sy, rPx, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = 'rgba(255, 190, 50, 0.35)'; c.lineWidth = 1.2; c.setLineDash([4, 4]);
+      c.beginPath(); c.arc(sx, sy, rPx * 0.5, 0, Math.PI * 2); c.stroke();
+      c.strokeStyle = '#ffbe32'; c.lineWidth = 2; c.setLineDash([7, 5]);
+      c.beginPath(); c.arc(sx, sy, rPx, 0, Math.PI * 2); c.stroke();
+      c.setLineDash([]);
+      const lbl = `${fmtHms(this.rangeMin * 60)} · ${this.o.units?.[this.rangeUnit] ?? this.rangeUnit}`;
+      c.font = '600 11px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'bottom';
+      const ly = sy - rPx - 4;
+      c.strokeStyle = 'rgba(0,0,0,.8)'; c.lineWidth = 3; c.strokeText(lbl, sx, ly);
+      c.fillStyle = '#ffbe32'; c.fillText(lbl, sx, ly);
+      c.restore();
+    }
+    c.strokeStyle = '#ffbe32'; c.lineWidth = 2;
+    c.beginPath(); c.arc(sx, sy, 8, 0, Math.PI * 2); c.stroke();
+  }
+
+  private paintRuler() {
+    const a = this.rulerA !== null ? this.townById.get(this.rulerA) : undefined;
+    if (!a) return;
+    const b = this.rulerB !== null ? this.townById.get(this.rulerB) : undefined;
+    const [ax, ay] = this.toScreen(a.x, a.y);
+    const c = this.c;
+    c.save();
+    const pin = (x: number, y: number, col: string, tag: string) => {
+      c.fillStyle = col; c.strokeStyle = '#111'; c.lineWidth = 2;
+      c.beginPath(); c.arc(x, y, 6, 0, Math.PI * 2); c.fill(); c.stroke();
+      c.font = '700 11px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'bottom';
+      c.strokeStyle = 'rgba(0,0,0,.85)'; c.lineWidth = 3; c.strokeText(tag, x, y - 9);
+      c.fillStyle = col; c.fillText(tag, x, y - 9);
+    };
+    if (b) {
+      const [bx, by] = this.toScreen(b.x, b.y);
+      c.strokeStyle = 'rgba(0,0,0,.75)'; c.lineWidth = 4;
+      c.beginPath(); c.moveTo(ax, ay); c.lineTo(bx, by); c.stroke();
+      c.strokeStyle = '#ffe14d'; c.lineWidth = 2; c.setLineDash([7, 5]);
+      c.beginPath(); c.moveTo(ax, ay); c.lineTo(bx, by); c.stroke();
+      c.setLineDash([]);
+      const atk = mapTownTravel(a, b, 'attack_ship', this.speeds, this.mods);
+      const col = mapTownTravel(a, b, 'colonize_ship', this.speeds, this.mods);
+      if (atk && col) {
+        const mx = (ax + bx) / 2, my = (ay + by) / 2;
+        const txt = `${atk.sameIsland ? '=' : `${atk.distGrid.toFixed(1)} isl`} · ⛵ ${fmtHms(atk.seconds)} · 👑 ${fmtHms(col.seconds)}`;
+        c.font = '600 12px system-ui, sans-serif';
+        const tw = c.measureText(txt).width + 14;
+        c.fillStyle = 'rgba(22, 18, 12, 0.9)'; c.strokeStyle = '#ffe14d'; c.lineWidth = 1.2;
+        c.beginPath(); c.roundRect(mx - tw / 2, my - 12, tw, 22, 6); c.fill(); c.stroke();
+        c.fillStyle = '#fff5cc'; c.textAlign = 'center'; c.textBaseline = 'middle';
+        c.fillText(txt, mx, my - 1);
+      }
+      pin(bx, by, '#4ade80', `B: ${b.name}`);
+    }
+    pin(ax, ay, '#ffe14d', `A: ${a.name}`);
+    c.restore();
+  }
+
   // ------------------------------------------------------------ side panel (legend, layers, details, conquests)
   private sideKey = '';
   private renderSide(recent: MapPayload['conquests']) {
-    const key = `${this.mode}|${this.t}|${this.windowDays}|${recent.length}|${this.showCmds}|${this.showTargets}|${this.showLabels}|${this.showHeat}|${this.selected}|${this.targets.size}`;
+    const key = `${this.mode}|${this.t}|${this.windowDays}|${recent.length}|${this.showCmds}|${this.showTargets}|${this.showLabels}|${this.showHeat}|${this.selected}|${this.targets.size}|${this.rulerMode}|${this.rulerA}|${this.rulerB}|${this.rangePick}|${this.rangeOrigin}|${this.rangeUnit}|${this.rangeMin}|${JSON.stringify(this.mods)}`;
     if (key === this.sideKey) return;
     this.sideKey = key;
     const { L, esc } = this.o;
@@ -482,7 +610,10 @@ export class MapView {
       const nIn = this.targets.get(sel.id) ?? 0;
       details = `<section class="det"><h3>${esc(sel.name)} <button class="x" data-close>×</button></h3>
         <p>${sel.pts.toLocaleString()} ${esc(L('points'))}<br>${esc(L('owner'))}: <b>${esc(pn(own.p))}</b><br>${esc(L('alliance'))}: ${esc(an(own.a) || L('noAlliance'))}
-        <br>${esc(L('island'))}: ${sel.ix}|${sel.iy} · ${esc(L('ocean'))} ${String(oceanOf(sel.ix, sel.iy)).padStart(2, '0')}${nIn ? `<br><b class="hot">${esc(L('incomingHere', { n: nIn }))}</b>` : ''}</p>${this.townInfoHtml()}</section>`;
+        <br>${esc(L('island'))}: ${sel.ix}|${sel.iy} · ${esc(L('ocean'))} ${String(oceanOf(sel.ix, sel.iy)).padStart(2, '0')}${nIn ? `<br><b class="hot">${esc(L('incomingHere', { n: nIn }))}</b>` : ''}</p>
+        <div class="map-act"><button class="gbtn small" data-from-ruler="${sel.id}">${esc(L('mapRulerFromHere'))}</button>
+        <button class="gbtn small" data-from-range="${sel.id}">${esc(L('mapRangeFromHere'))}</button></div>
+        ${this.townInfoHtml()}</section>`;
       this.loadTownInfo(sel.id);
     }
     const list = recent.slice(-40).reverse().map((q) => {
@@ -490,11 +621,11 @@ export class MapView {
       const when = new Date(q[0] * 1000).toLocaleString(this.o.lang === 'el' ? 'el-GR' : 'en-GB', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
       return `<li data-town="${q[1]}"><span class="muted">${esc(when)}</span> ${esc(L('conquered', { town: tw?.name ?? `#${q[1]}`, to: `${pn(q[2])}${an(q[4]) ? ` [${an(q[4])}]` : ''}`, from: `${pn(q[3])}${an(q[5]) ? ` [${an(q[5])}]` : ''}` }))}</li>`;
     }).join('');
-    this.side.innerHTML = `${details}<h3>${esc(L('legend'))}</h3><ul class="legend">${legend.map(([c, n, extra]) => `<li><span class="sw" style="background:${c}"></span><span class="ln">${esc(n)}</span><span class="muted">${esc(extra)}</span></li>`).join('')}
+    this.side.innerHTML = `${details}${this.rulerHtml()}${this.rangeHtml()}<h3>${esc(L('legend'))}</h3><ul class="legend">${legend.map(([c, n, extra]) => `<li><span class="sw" style="background:${c}"></span><span class="ln">${esc(n)}</span><span class="muted">${esc(extra)}</span></li>`).join('')}
       ${this.mode === 'sides' ? `<li><span class="sw ring"></span><span class="ln">${esc(L('legendTargets'))}</span><span class="muted">${this.targets.size}</span></li>` : ''}</ul>
       ${this.mode === 'sides' ? `<p class="muted small ${src === 'none' ? 'warnline' : ''}">${esc(L(`sidesFrom.${src}` as WebKey))}</p>` : ''}
       <h3>${esc(L('layers'))}</h3>
-      <label class="chk"><input type="checkbox" data-l="cmds" ${this.showCmds ? 'checked' : ''}> ${esc(L('showCommands'))}</label>
+      <label class="chk"><input type="checkbox" data-l="cmds" ${this.showCmds ? 'checked' : ''}> ${esc(L('mapMovements'))}</label>
       <label class="chk"><input type="checkbox" data-l="targets" ${this.showTargets ? 'checked' : ''}> ${esc(L('highlightTargets'))}</label>
       <label class="chk"><input type="checkbox" data-l="labels" ${this.showLabels ? 'checked' : ''}> ${esc(L('labels'))}</label>
       <label class="chk" title="${esc(L('heatHint'))}"><input type="checkbox" data-l="heat" ${this.showHeat ? 'checked' : ''}> ${esc(L('heatLayer'))}</label>
@@ -507,9 +638,102 @@ export class MapView {
       this.o.onWantCommands(this.wantsCommands()); this.sideKey = ''; this.draw();
     }));
     this.side.querySelector('[data-close]')?.addEventListener('click', () => { this.selected = null; this.sideKey = ''; this.draw(); });
+    this.bindTools();
     this.side.querySelectorAll<HTMLElement>('[data-town]').forEach((li) => li.addEventListener('click', () => this.focusTown(Number(li.dataset.town))));
     this.drawChart();
   }
+  private rulerHtml(): string {
+    if (!this.rulerMode && this.rulerA === null) return '';
+    const { L, esc } = this.o;
+    const a = this.rulerA !== null ? this.townById.get(this.rulerA) : undefined;
+    const b = this.rulerB !== null ? this.townById.get(this.rulerB) : undefined;
+    let body = '';
+    if (!a) body = `<p class="muted small">${esc(L('mapRulerPickA'))}</p>`;
+    else if (!b) body = `<p class="small"><b>A:</b> ${esc(a.name)} (${a.ix}|${a.iy})<br><span class="muted">${esc(L('mapRulerPickB'))}</span></p>`;
+    else {
+      const sample = mapTownTravel(a, b, 'attack_ship', this.speeds, this.mods);
+      const dist = sample?.sameIsland ? L('mapRulerSame', { u: fmtHms(sample.uncertainty) }) : L('mapRulerDist', { d: (sample?.distGrid ?? 0).toFixed(1) });
+      const rows = RULER_UNIT_ORDER.filter((u) => this.speeds.units[u]).map((u) => {
+        const est = mapTownTravel(a, b, u, this.speeds, this.mods)!;
+        const name = this.o.units?.[u] ?? u;
+        const tr = est.viaTransport ? ` <span class="muted small">(${esc(this.o.units?.[est.viaTransport] ?? est.viaTransport)})</span>` : '';
+        return `<tr><td>${unitIcon(u, name, 18)} ${esc(name)}${tr}</td><td class="mono"><b>${fmtHms(est.seconds)}</b></td></tr>`;
+      }).join('');
+      body = `<p class="small"><b>${esc(a.name)}</b> → <b>${esc(b.name)}</b> <span class="muted">(${esc(dist)})</span></p>
+        <div class="map-mods">${this.modsHtml()}</div>
+        <div class="map-utbl"><table><tbody>${rows}</tbody></table></div>`;
+    }
+    return `<section class="det map-tool"><h3>📏 ${esc(L('mapRuler'))} <span>${a && b ? `<button class="x" data-rswap title="${esc(L('mapRulerSwap'))}">⇄</button>` : ''}<button class="x" data-rclear title="${esc(L('mapRulerClear'))}">×</button></span></h3>${body}</section>`;
+  }
+
+  private modsHtml(): string {
+    const { L, esc } = this.o, m = this.mods;
+    return `<label class="chk"><input type="checkbox" data-mod="meteorology"${m.meteorology ? ' checked' : ''}> ${esc(L('mapMeteorology'))}</label>
+      <label class="chk"><input type="checkbox" data-mod="cartography"${m.cartography ? ' checked' : ''}> ${esc(L('mapCartography'))}</label>
+      <label class="chk"><input type="checkbox" data-mod="lighthouse"${m.lighthouse ? ' checked' : ''}> ${esc(L('mapLighthouse'))}</label>
+      <label class="chk"><input type="checkbox" data-mod="fast"${m.transport === 'small_transporter' ? ' checked' : ''}> ${esc(L('mapFastTrans'))}</label>
+      <label class="small">${esc(L('mapBoost'))} <input type="number" min="0" max="200" step="5" data-boost value="${m.boost ?? 0}" style="width:4.2em"></label>`;
+  }
+
+  private rangeHtml(): string {
+    const { L, esc } = this.o;
+    const myTowns = this.o.me ? this.towns.filter((tw) => tw.p === this.o.me).sort((a, b) => a.name.localeCompare(b.name)) : [];
+    const orig = this.rangeOrigin !== null ? this.townById.get(this.rangeOrigin) : undefined;
+    const rad = orig ? mapRangeRadius(this.rangeUnit, this.rangeMin * 60, this.speeds, this.mods) : 0;
+    let inAll = 0, inEnemy = 0;
+    if (orig && rad > 0) {
+      const r2 = rad * rad;
+      this.townGrid.each(orig.x - rad - 1, orig.y - rad - 1, orig.x + rad + 1, orig.y + rad + 1, (i) => {
+        const tw = this.towns[i];
+        if (tw.id === orig.id || (tw.x - orig.x) ** 2 + (tw.y - orig.y) ** 2 > r2) return;
+        inAll++;
+        if (this.sideOfTown(tw) === 'enemy') inEnemy++;
+      });
+    }
+    const unitOpts = RULER_UNIT_ORDER.filter((u) => this.speeds.units[u]).map((u) => `<option value="${u}"${u === this.rangeUnit ? ' selected' : ''}>${esc(this.o.units?.[u] ?? u)}</option>`).join('');
+    const mySel = myTowns.length ? `<select data-rng-my><option value="">${esc(L('mapRangeOrigin'))}…</option>${myTowns.map((t) => `<option value="${t.id}"${t.id === this.rangeOrigin ? ' selected' : ''}>${esc(t.name)} (${t.ix}|${t.iy})</option>`).join('')}</select>` : '';
+    return `<details class="det map-tool"${orig || this.rangePick ? ' open' : ''}><summary>🎯 ${esc(L('mapRange'))}</summary>
+      <div class="map-rng">
+        ${mySel}
+        <div class="map-act"><button class="gbtn small${this.rangePick ? ' on' : ''}" data-rng-pick>${esc(L('mapRangePick'))}</button>${orig ? `<button class="gbtn small" data-rng-clr>✕</button>` : ''}</div>
+        ${orig ? `<p class="small"><b>${esc(orig.name)}</b> (${orig.ix}|${orig.iy})</p>` : ''}
+        <label class="small">${esc(L('mapRangeUnit'))} <select data-rng-unit>${unitOpts}</select></label>
+        <label class="small">${esc(L('mapRangeTime'))} <input type="number" min="1" max="2880" step="5" data-rng-min value="${this.rangeMin}" style="width:5em"></label>
+        <div class="map-act">${[15, 30, 60, 120, 240].map((m) => `<button class="gbtn small${this.rangeMin === m ? ' on' : ''}" data-rng-pre="${m}">${m < 60 ? `${m}m` : `${m / 60}h`}</button>`).join('')}</div>
+        ${orig && this.rulerA === null ? `<div class="map-mods">${this.modsHtml()}</div>` : ''}
+        ${orig ? `<p class="small">${rad > 0 ? esc(L('mapRangeIn', { n: inAll, e: inEnemy })) : esc(L('mapRangeNone'))}</p>` : ''}
+      </div></details>`;
+  }
+
+  private bindTools() {
+    this.side.querySelector('[data-rswap]')?.addEventListener('click', () => { [this.rulerA, this.rulerB] = [this.rulerB, this.rulerA]; this.sideKey = ''; this.draw(); });
+    this.side.querySelector('[data-rclear]')?.addEventListener('click', () => { this.rulerA = this.rulerB = null; this.rulerMode = false; this.root.querySelector('[data-ruler]')?.classList.remove('on'); this.sideKey = ''; this.draw(); });
+    this.side.querySelectorAll<HTMLElement>('[data-from-ruler]').forEach((b) => b.addEventListener('click', () => {
+      this.rulerA = Number(b.dataset.fromRuler); this.rulerB = null; this.rulerMode = true;
+      this.root.querySelector('[data-ruler]')?.classList.add('on'); this.sideKey = ''; this.draw();
+    }));
+    this.side.querySelectorAll<HTMLElement>('[data-from-range]').forEach((b) => b.addEventListener('click', () => {
+      this.rangeOrigin = Number(b.dataset.fromRange); this.rangePick = false; this.sideKey = ''; this.draw();
+    }));
+    this.side.querySelectorAll<HTMLInputElement>('[data-mod]').forEach((cb) => cb.addEventListener('change', () => {
+      const k = cb.dataset.mod;
+      if (k === 'fast') this.mods.transport = cb.checked ? 'small_transporter' : 'big_transporter';
+      else if (k === 'meteorology' || k === 'cartography' || k === 'lighthouse') this.mods[k] = cb.checked;
+      this.sideKey = ''; this.draw();
+    }));
+    this.side.querySelector<HTMLInputElement>('[data-boost]')?.addEventListener('change', (e) => {
+      this.mods.boost = Math.max(0, Math.min(200, Number((e.target as HTMLInputElement).value) || 0)); this.sideKey = ''; this.draw();
+    });
+    this.side.querySelector<HTMLSelectElement>('[data-rng-my]')?.addEventListener('change', (e) => {
+      this.rangeOrigin = Number((e.target as HTMLSelectElement).value) || null; this.rangePick = false; this.sideKey = ''; this.draw();
+    });
+    this.side.querySelector('[data-rng-pick]')?.addEventListener('click', () => { this.rangePick = !this.rangePick; this.sideKey = ''; this.draw(); });
+    this.side.querySelector('[data-rng-clr]')?.addEventListener('click', () => { this.rangeOrigin = null; this.rangePick = false; this.sideKey = ''; this.draw(); });
+    this.side.querySelector<HTMLSelectElement>('[data-rng-unit]')?.addEventListener('change', (e) => { this.rangeUnit = (e.target as HTMLSelectElement).value; this.sideKey = ''; this.draw(); });
+    this.side.querySelector<HTMLInputElement>('[data-rng-min]')?.addEventListener('change', (e) => { this.rangeMin = Math.max(1, Math.min(2880, Number((e.target as HTMLInputElement).value) || 60)); this.sideKey = ''; this.draw(); });
+    this.side.querySelectorAll<HTMLElement>('[data-rng-pre]').forEach((b) => b.addEventListener('click', () => { this.rangeMin = Number(b.dataset.rngPre); this.sideKey = ''; this.draw(); }));
+  }
+
   private drawChart() {
     const cv = this.side.querySelector<HTMLCanvasElement>('canvas.chart');
     if (!cv) return;
@@ -553,21 +777,44 @@ export class MapView {
     this.view.scale = Math.max(1, Math.min(30, Math.min(this.w, this.h) / Math.max(8, (x1 - x0) * 1.2, (y1 - y0) * 1.2)));
     this.draw();
   }
-  /** Search suggestions: alliances, players, towns (prefix first, then substring), max 8. */
-  private suggestions(q: string): { kind: 'a' | 'p' | 't'; id: number; label: string; sub: string }[] {
-    const s = q.trim().toLowerCase();
-    if (s.length < 2) return [];
-    const out: { kind: 'a' | 'p' | 't'; id: number; label: string; sub: string; rank: number }[] = [];
-    const score = (n: string) => { const l = n.toLowerCase(); return l === s ? 0 : l.startsWith(s) ? 1 : l.includes(s) ? 2 : -1; };
-    for (const [id, a] of this.alliances) { const r = score(a.name); if (r >= 0) out.push({ kind: 'a', id, label: a.name, sub: `${a.towns} 🏛`, rank: r * 3 }); }
-    for (const [id, p] of this.players) { const r = score(p.name); if (r >= 0) out.push({ kind: 'p', id, label: p.name, sub: this.alliances.get(p.a)?.name ?? '', rank: r * 3 + 1 }); }
-    if (out.length < 30) for (const tw of this.towns) { const r = score(tw.name); if (r >= 0) out.push({ kind: 't', id: tw.id, label: tw.name, sub: `${tw.ix}|${tw.iy}`, rank: r * 3 + 2 }); if (out.length > 200) break; }
-    return out.sort((a, b) => a.rank - b.rank || a.label.localeCompare(b.label)).slice(0, 8);
+  /** Search suggestions: oceans ("45", "ocean 45"), coords ("450|530"), alliances, players, towns. */
+  private suggestions(q: string): { kind: 'a' | 'p' | 't' | 'o' | 'xy'; id: number; label: string; sub: string }[] {
+    const out: { kind: 'a' | 'p' | 't' | 'o' | 'xy'; id: number; label: string; sub: string; rank: number }[] = [];
+    const sq = parseMapQuery(q);
+    if (sq?.kind === 'ocean') {
+      let cnt = 0; for (const tw of this.towns) if (oceanOf(tw.ix, tw.iy) === sq.ocean) cnt++;
+      if (cnt > 0 || (sq.ocean >= 10 && sq.ocean <= 99)) out.push({ kind: 'o', id: sq.ocean, label: this.o.L('oceanN', { n: String(sq.ocean).padStart(2, '0') }), sub: `${cnt} 🏛`, rank: -2 });
+    } else if (sq?.kind === 'xy') {
+      out.push({ kind: 'xy', id: sq.ix * 10000 + sq.iy, label: `${sq.ix}|${sq.iy}`, sub: this.o.L('oceanN', { n: String(oceanOf(sq.ix, sq.iy)).padStart(2, '0') }), rank: -2 });
+    }
+    const norm = (x: string) => x.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    const s = norm(q.trim());
+    if (s.length < 2 && !out.length) return [];
+    if (s.length >= 2) {
+      const score = (n: string) => { const l = norm(n); return l === s ? 0 : l.startsWith(s) ? 1 : l.includes(s) ? 2 : -1; };
+      for (const [id, a] of this.alliances) { const r = score(a.name); if (r >= 0) out.push({ kind: 'a', id, label: a.name, sub: `${a.towns} 🏛`, rank: r * 3 }); }
+      for (const [id, p] of this.players) { const r = score(p.name); if (r >= 0) out.push({ kind: 'p', id, label: p.name, sub: this.alliances.get(p.a)?.name ?? '', rank: r * 3 + 1 }); }
+      if (out.length < 30) for (const tw of this.towns) { const r = score(tw.name); if (r >= 0) out.push({ kind: 't', id: tw.id, label: tw.name, sub: `${tw.ix}|${tw.iy} · O${String(oceanOf(tw.ix, tw.iy)).padStart(2, '0')}`, rank: r * 3 + 2 }); if (out.length > 200) break; }
+    }
+    return out.sort((a, b) => a.rank - b.rank || a.label.localeCompare(b.label)).slice(0, 10);
   }
-  private pick(kind: 'a' | 'p' | 't', id: number) {
+  private pick(kind: 'a' | 'p' | 't' | 'o' | 'xy', id: number) {
     this.sugg.hidden = true;
-    if (kind === 't') return this.focusTown(id);
-    this.highlight = { kind, id };
+    const clr = this.root.querySelector<HTMLElement>('[data-hl-clear]');
+    if (kind === 't') { if (clr) clr.hidden = false; return this.focusTown(id); }
+    if (kind === 'o') {
+      this.highlight = { kind: 'o', id }; if (clr) clr.hidden = false;
+      const ox = Math.floor(id / 10) * 100 + 50, oy = (id % 10) * 100 + 50;
+      this.view.cx = ox; this.view.cy = oy; this.view.scale = Math.max(1, Math.min(12, Math.min(this.w, this.h) / 112));
+      return this.draw();
+    }
+    if (kind === 'xy') {
+      const ix = Math.floor(id / 10000), iy = id % 10000;
+      this.highlight = { kind: 'xy', id, x: ix + 0.5, y: iy + 0.5 }; if (clr) clr.hidden = false;
+      this.view.cx = ix + 0.5; this.view.cy = iy + 0.5; this.view.scale = Math.max(this.view.scale, 18);
+      return this.draw();
+    }
+    this.highlight = { kind, id }; if (clr) clr.hidden = false;
     this.centerOn((tw) => (kind === 'a' ? this.allianceOf(tw.p) === id : tw.p === id));
   }
   private hit(sx: number, sy: number): Town | null {
@@ -576,6 +823,27 @@ export class MapView {
     let best: Town | null = null, bd = 12 * 12;
     this.townGrid.each(wx - rad, wy - rad, wx + rad, wy + rad, (i) => { const tw = this.towns[i]; const [x, y] = this.toScreen(tw.x, tw.y); const d = (x - sx) ** 2 + (y - sy) ** 2; if (d < bd) { bd = d; best = tw; } });
     return best;
+  }
+  private hitArrow(sx: number, sy: number): LiveCommand | null {
+    if (!this.showCmds || !this.arrowSegs.length) return null;
+    for (let i = this.arrowSegs.length - 1; i >= 0; i--) {
+      const a = this.arrowSegs[i];
+      let px = a.x1, py = a.y1;
+      for (let k = 1; k <= 6; k++) {
+        const t = k / 6, q = 1 - t;
+        const nx = q * q * a.x1 + 2 * q * t * a.cx + t * t * a.x2, ny = q * q * a.y1 + 2 * q * t * a.cy + t * t * a.y2;
+        const dx = nx - px, dy = ny - py, l2 = dx * dx + dy * dy;
+        const u = l2 ? Math.max(0, Math.min(1, ((sx - px) * dx + (sy - py) * dy) / l2)) : 0;
+        if (Math.hypot(sx - px - u * dx, sy - py - u * dy) < 8) return a.cmd;
+        px = nx; py = ny;
+      }
+    }
+    return null;
+  }
+  private showArrowTip(cmd: LiveCommand, x: number, y: number) {
+    const { esc } = this.o;
+    const left = fmtHms(cmd.arrival - Date.now() / 1000);
+    this.tipHtml(`<b>${esc(cmd.type)}</b> · ${left}<br>${esc(cmd.src.town)} (${esc(cmd.src.player)}) → ${esc(cmd.trg.town)} (${esc(cmd.trg.player)})`, x, y);
   }
   private showTip(tw: Town, x: number, y: number) {
     const { L, esc } = this.o;
@@ -598,13 +866,34 @@ export class MapView {
     let st = 0;
     input.addEventListener('input', () => { clearTimeout(st); st = window.setTimeout(() => {
       const res = this.suggestions(input.value);
-      const icon = { a: '🛡', p: '👤', t: '🏛' } as const;
+      const icon = { a: '🛡', p: '👤', t: '🏛', o: '🌊', xy: '📍' } as const;
       this.sugg.innerHTML = res.map((r) => `<li data-k="${r.kind}" data-id="${r.id}"><span>${icon[r.kind]} ${this.o.esc(r.label)}</span><span class="muted">${this.o.esc(r.sub)}</span></li>`).join('');
       this.sugg.hidden = !res.length;
-      if (!input.value.trim()) { this.highlight = null; this.draw(); }
+      if (!input.value.trim()) { this.highlight = null; this.root.querySelector<HTMLElement>('[data-hl-clear]')!.hidden = true; this.draw(); }
     }, 120); });
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const f = this.suggestions(input.value)[0]; if (f) this.pick(f.kind, f.id); } if (e.key === 'Escape') this.sugg.hidden = true; });
-    this.sugg.addEventListener('click', (e) => { const li = (e.target as HTMLElement).closest<HTMLElement>('li'); if (li) { input.value = li.querySelector('span')!.textContent!.slice(2).trim(); this.pick(li.dataset.k as 'a' | 'p' | 't', Number(li.dataset.id)); } });
+    let activeIdx = -1;
+    input.addEventListener('keydown', (e) => {
+      const items = [...this.sugg.querySelectorAll<HTMLElement>('li')];
+      if (e.key === 'ArrowDown' && items.length) { e.preventDefault(); activeIdx = (activeIdx + 1) % items.length; items.forEach((li, i) => li.classList.toggle('on', i === activeIdx)); return; }
+      if (e.key === 'ArrowUp' && items.length) { e.preventDefault(); activeIdx = (activeIdx - 1 + items.length) % items.length; items.forEach((li, i) => li.classList.toggle('on', i === activeIdx)); return; }
+      if (e.key === 'Enter') {
+        const li = items[activeIdx];
+        if (li) { input.value = li.querySelector('span')!.textContent!.slice(2).trim(); this.pick(li.dataset.k as 'a' | 'p' | 't' | 'o' | 'xy', Number(li.dataset.id)); activeIdx = -1; return; }
+        const f = this.suggestions(input.value)[0]; if (f) this.pick(f.kind, f.id);
+      }
+      if (e.key === 'Escape') { this.sugg.hidden = true; activeIdx = -1; }
+    });
+    this.sugg.addEventListener('click', (e) => { const li = (e.target as HTMLElement).closest<HTMLElement>('li'); if (li) { input.value = li.querySelector('span')!.textContent!.slice(2).trim(); this.pick(li.dataset.k as 'a' | 'p' | 't' | 'o' | 'xy', Number(li.dataset.id)); } });
+    this.root.querySelector('[data-ruler]')!.addEventListener('click', (e) => {
+      this.rulerMode = !this.rulerMode;
+      (e.currentTarget as HTMLElement).classList.toggle('on', this.rulerMode);
+      if (this.rulerMode && this.selected && this.rulerA === null) this.rulerA = this.selected;
+      if (this.rulerMode) this.root.querySelector('.mapwrap')!.classList.add('side-open');
+      this.sideKey = ''; this.draw();
+    });
+    this.root.querySelector('[data-hl-clear]')!.addEventListener('click', (e) => {
+      this.highlight = null; input.value = ''; (e.currentTarget as HTMLElement).hidden = true; this.draw();
+    });
     this.root.querySelector('.side-toggle')!.addEventListener('click', () => this.root.querySelector('.mapwrap')!.classList.toggle('side-open'));
     this.root.querySelectorAll<HTMLButtonElement>('[data-z]').forEach((b) => b.addEventListener('click', () => this.zoomAt(this.w / 2, this.h / 2, Number(b.dataset.z) > 0 ? 1.6 : 1 / 1.6)));
     this.slider.addEventListener('input', () => this.setT(this.tMin + (Number(this.slider.value) / 1000) * (this.tMax - this.tMin)));
@@ -634,10 +923,18 @@ export class MapView {
         this.view.cx = drag.cx - (e.offsetX - drag.x) / this.view.scale; this.view.cy = drag.cy - (e.offsetY - drag.y) / this.view.scale; this.tip.style.display = 'none'; return this.draw();
       }
       hover = { x: e.offsetX, y: e.offsetY };
-      if (!hoverRaf) hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; if (!hover) return; const ex = this.hoverExtra?.(hover.x, hover.y); if (ex) return this.tipHtml(ex, hover.x, hover.y); const tw = this.hit(hover.x, hover.y); if (tw) this.showTip(tw, hover.x, hover.y); else this.tip.style.display = 'none'; });
+      if (!hoverRaf) hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; if (!hover) return; const ex = this.hoverExtra?.(hover.x, hover.y); if (ex) return this.tipHtml(ex, hover.x, hover.y); const tw = this.hit(hover.x, hover.y); if (tw) return this.showTip(tw, hover.x, hover.y); const ac = this.hitArrow(hover.x, hover.y); if (ac) return this.showArrowTip(ac, hover.x, hover.y); this.tip.style.display = 'none'; });
     });
     const up = (e: PointerEvent) => {
-      if (drag && !drag.moved && this.pointers.size === 1) { const tw = this.hit(e.offsetX, e.offsetY); this.selected = tw ? tw.id : null; this.sideKey = ''; if (tw) this.root.querySelector('.mapwrap')!.classList.add('side-open'); this.draw(); }
+      if (drag && !drag.moved && this.pointers.size === 1) {
+        const tw = this.hit(e.offsetX, e.offsetY);
+        if (tw && this.rangePick) { this.rangeOrigin = tw.id; this.rangePick = false; this.sideKey = ''; this.root.querySelector('.mapwrap')!.classList.add('side-open'); this.draw(); }
+        else if (tw && this.rulerMode) {
+          if (this.rulerA === null || this.rulerA === tw.id) this.rulerA = tw.id;
+          else this.rulerB = tw.id;
+          this.sideKey = ''; this.root.querySelector('.mapwrap')!.classList.add('side-open'); this.draw();
+        } else { this.selected = tw ? tw.id : null; this.sideKey = ''; if (tw) this.root.querySelector('.mapwrap')!.classList.add('side-open'); this.draw(); }
+      }
       this.pointers.delete(e.pointerId); if (this.pointers.size < 2) pinch = null; if (!this.pointers.size) drag = null;
     };
     cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);

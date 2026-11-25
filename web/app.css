@@ -472,3 +472,18 @@ h3 .sx-count { margin-left:6px; }
 .clock { display:flex; align-items:flex-end; gap:2px; height:48px; background:var(--panel2); border-radius:4px; padding:3px; }
 .clock i { flex:1; background:#f0a33a; min-height:1px; border-radius:1px; }
 .clock-x { display:flex; justify-content:space-between; font-size:10px; color:var(--muted); }
+
+/* ---- map tools: ruler, range rings, smart search */
+.sugg li.on { background:#efdfb3; }
+.topbar .gbtn.on { background:#2f5f9a; color:#fff; border-color:#2f5f9a; }
+.map-act { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0; }
+.map-tool { margin-top:8px; }
+.map-tool summary { cursor:pointer; font-weight:600; color:#5a3a12; }
+.map-mods { display:grid; grid-template-columns:1fr 1fr; gap:2px 8px; margin:4px 0 6px; }
+.map-mods input[type=number], .map-rng input[type=number], .map-rng select { background:#fffaf0; color:#3b2a14; border:1px solid #b89a5c; border-radius:4px; padding:2px 5px; font:inherit; font-size:12px; }
+.map-utbl { max-height:220px; overflow:auto; border:1px solid #dcc99c; border-radius:4px; background:#fff; }
+.map-utbl table { font-size:12px; }
+.map-utbl td { padding:3px 6px; border-bottom:1px solid #efe4c8; vertical-align:middle; }
+.map-utbl td:last-child { text-align:right; white-space:nowrap; }
+.map-rng { display:flex; flex-direction:column; gap:5px; margin-top:6px; }
+.map-rng > label { display:flex; justify-content:space-between; align-items:center; gap:6px; }

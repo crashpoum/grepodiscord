@@ -7,8 +7,9 @@ import type { WorldSnapshot } from '../data/snapshot.js';
 
 export type { MapPayload } from './types.js';
 import type { MapPayload } from './types.js';
+import type { MapSpeeds } from './travel.js';
 
-export function buildMapPayload(snap: WorldSnapshot, sides: { ours: number[]; enemies: number[]; allies?: number[]; source?: MapPayload['sides']['source'] }, opts: { now?: number; maxConquests?: number; history?: Record<string, Record<number, number>>; me?: number | null } = {}): MapPayload {
+export function buildMapPayload(snap: WorldSnapshot, sides: { ours: number[]; enemies: number[]; allies?: number[]; source?: MapPayload['sides']['source'] }, opts: { now?: number; maxConquests?: number; history?: Record<string, Record<number, number>>; me?: number | null; speeds?: MapSpeeds } = {}): MapPayload {
   const towns: MapPayload['towns'] = [];
   for (const x of snap.towns.values()) towns.push([x.id, x.islandX, x.islandY, x.slot, x.playerId ?? 0, x.points, x.name]);
   const players: MapPayload['players'] = [];
@@ -18,7 +19,7 @@ export function buildMapPayload(snap: WorldSnapshot, sides: { ours: number[]; en
   const max = opts.maxConquests ?? 25_000;
   const cq = [...snap.conquers].sort((a, b) => a.time - b.time).slice(-max)
     .map((c): MapPayload['conquests'][number] => [c.time, c.townId, c.newPlayerId ?? 0, c.oldPlayerId ?? 0, c.newAllianceId ?? 0, c.oldAllianceId ?? 0]);
-  return { world: snap.world, generatedAt: opts.now ?? Date.now(), towns, players, alliances, sides: { ours: sides.ours, allies: sides.allies ?? [], enemies: sides.enemies, source: sides.source ?? (sides.ours.length ? 'set' : 'none') }, conquests: cq, history: opts.history ?? {}, me: opts.me ?? null };
+  return { world: snap.world, generatedAt: opts.now ?? Date.now(), towns, players, alliances, sides: { ours: sides.ours, allies: sides.allies ?? [], enemies: sides.enemies, source: sides.source ?? (sides.ours.length ? 'set' : 'none') }, conquests: cq, history: opts.history ?? {}, me: opts.me ?? null, ...(opts.speeds ? { speeds: opts.speeds } : {}) };
 }
 
 export type MapSides = MapPayload['sides'];

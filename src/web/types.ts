@@ -1,3 +1,4 @@
+import type { MapSpeeds } from './travel.js';
 /** Shapes shared by the server and the browser bundle (no runtime code, no node imports). */
 export interface LiveEnd { town: string; townId: number | null; player: string; playerId: number | null; alliance: string; allianceId: number | null }
 export interface LiveCommand { id: string; type: string; sub: string; arrival: number; started: number | null; src: LiveEnd; trg: LiveEnd; units: [string, number][]; by: string; own: boolean; ret: boolean; planned: boolean; side: 'in' | 'out' | 'other';
@@ -43,5 +44,6 @@ export interface MapPayload {
   /** Daily alliance towns history from the bot's own records: { day: { allianceId: towns } } (last 40 days). */
   history: Record<string, Record<number, number>>;
   me: number | null;
+  speeds?: MapSpeeds;
 }
 

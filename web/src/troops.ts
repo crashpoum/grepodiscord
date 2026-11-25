@@ -1,5 +1,5 @@
 /**
- * /troops: alliance town lists shared from GrepoGod, shown like its Friends panel
+ * /troops: alliance town lists pushed by members' sync clients, shown as a town grid
  * (2-column town grid, troops in town / support / total / wall, plus resources and active spells).
  * Filtering and totals run only when data or filters change; the 1 s timer only refreshes ages and countdowns.
  */

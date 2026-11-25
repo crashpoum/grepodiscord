@@ -107,10 +107,20 @@ export class DrawLayer {
       this.marks = [...v.marks, ...temp];
       this.canClearAll = v.canClearAll;
       this.bar.querySelector<HTMLElement>('[data-act=all]')!.hidden = !v.canClearAll;
+      this.applyPolicy(v);
       this.undoIds = this.undoIds.filter((id) => this.marks.some((m) => m.id === id));
       this.updateCount();
       this.schedule();
     } catch { /* offline: try again on the next tick */ } finally { this.polling = false; }
+  }
+  private policyDone = false;
+  /** Admin panel: who may draw (the pen button hides for others) and the default expiry (applied once). */
+  private applyPolicy(v: MarksView) {
+    if (v.canDraw === false) { this.bar.querySelector<HTMLElement>('[data-act=open]')!.hidden = true; this.bar.querySelector<HTMLElement>('.dtools')!.hidden = true; }
+    if (!this.policyDone && v.defaultTtl) {
+      this.policyDone = true; this.ttl = v.defaultTtl;
+      const sel = this.bar.querySelector<HTMLSelectElement>('[data-ttl]'); if (sel) sel.value = v.defaultTtl;
+    }
   }
   setMarks(v: MarksView) { this.rev = v.rev; this.marks = v.marks; this.canClearAll = v.canClearAll; this.updateCount(); this.schedule(); }
   private updateCount() { this.bar.querySelector('.dcount')!.textContent = this.o.L('drawCount', { n: this.marks.length }); }

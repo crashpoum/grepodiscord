@@ -7,9 +7,13 @@
  */
 import type { LiveCommand, MapPayload } from '../../src/web/types.js';
 import type { WebKey, WebLang } from '../../src/web/strings.js';
+import type { TownPanel } from '../../src/web/townPanel.js';
+import { fmtAt, typeChip, unitsAny } from './ui.js';
 import { allianceColor, decodeIslands, Grid, ISLAND_R, islandClass, islandShape, oceanOf, ownerAtTime, SIDE_COLOR, sideOf, townXY, type Hist, type Islands, type Side } from './geo.js';
 
-interface Opts { L: (k: WebKey, v?: Record<string, string | number>) => string; esc: (s: unknown) => string; lang: WebLang; me: number | null; onWantCommands: (on: boolean) => void; islands: ArrayBuffer | null }
+interface Opts { L: (k: WebKey, v?: Record<string, string | number>) => string; esc: (s: unknown) => string; lang: WebLang; me: number | null; onWantCommands: (on: boolean) => void; islands: ArrayBuffer | null;
+  /** Town-click details (owner history, activity clock, synced troops/incoming) from /api/town. */
+  townInfo?: (id: number) => Promise<TownPanel | null>; units?: Record<string, string> }
 type Mode = 'sides' | 'alliances';
 const DAY = 86400;
 const TILE = 256;
@@ -42,7 +46,8 @@ export class MapView {
   private selected: number | null = null;
   private commands: LiveCommand[] = [];
   private targets = new Map<number, number>();
-  private showCmds = false; private showTargets = true; private showLabels = true;
+  private showCmds = false; private showTargets = true; private showLabels = true; private showHeat = false;
+  private tinfo: { id: number; at: number; data: TownPanel | null; loading: boolean } | null = null;
   private raf = 0; dpr = 1;
   /** Called at the end of every map paint (same frame): the drawing overlay re-projects its shapes. */
   afterPaint: (() => void) | null = null;
@@ -98,7 +103,7 @@ export class MapView {
   }
 
   destroy() { this.ro.disconnect(); clearInterval(this.playing); cancelAnimationFrame(this.raf); document.removeEventListener('visibilitychange', this.onVis); this.tiles.clear(); }
-  wantsCommands() { return this.showCmds || this.showTargets; }
+  wantsCommands() { return this.showCmds || this.showTargets || this.showHeat; }
   setCommands(c: LiveCommand[]) {
     this.commands = c;
     this.targets.clear();
@@ -255,6 +260,8 @@ export class MapView {
       const [sx, sy] = this.toScreen(gx, gy);
       c.fillText(String(oceanOf(gx, gy)).padStart(2, '0'), sx + 6, sy + 6);
     }
+    // 2b. attack heatmap: conquests in the replay window + live incoming targets (additive soft blobs)
+    if (this.showHeat) this.paintHeat(wx0, wy0, wx1, wy1, sc);
     // 3. towns (batched per colour)
     const r = Math.max(1.6, Math.min(4.5, sc * 0.08));
     const byCol = new Map<string, Path2D>();
@@ -374,6 +381,61 @@ export class MapView {
     }
     c.textAlign = 'start';
   }
+  /** Heat per town: each conquest in the window counts 1 (fading with age), each live incoming command 0.6. */
+  private heatCache = { key: '', pts: [] as [number, number, number][] };
+  private paintHeat(wx0: number, wy0: number, wx1: number, wy1: number, sc: number) {
+    const key = `${this.t}|${this.windowDays}|${this.commands.length}`;
+    if (this.heatCache.key !== key) {
+      const w = new Map<number, number>();
+      for (const q of this.recentConquests(this.t - this.windowDays * DAY)) w.set(q[1], (w.get(q[1]) ?? 0) + Math.max(0.3, 1 - (this.t - q[0]) / (this.windowDays * DAY)));
+      for (const [id, n] of this.targets) w.set(id, (w.get(id) ?? 0) + 0.6 * n);
+      const pts: [number, number, number][] = [];
+      for (const [id, v] of w) { const tw = this.townById.get(id); if (tw) pts.push([tw.x, tw.y, v]); }
+      this.heatCache = { key, pts };
+    }
+    const c = this.c;
+    const rad = Math.max(14, Math.min(60, sc * 6));
+    c.save();
+    c.globalCompositeOperation = 'lighter';
+    for (const [x, y, v] of this.heatCache.pts) {
+      if (x < wx0 - 10 || x > wx1 + 10 || y < wy0 - 10 || y > wy1 + 10) continue;
+      const [sx, sy] = this.toScreen(x, y);
+      const r = rad * Math.min(2, 0.8 + Math.sqrt(v) * 0.4);
+      const g = c.createRadialGradient(sx, sy, 0, sx, sy, r);
+      const a = Math.min(0.55, 0.18 + v * 0.08);
+      g.addColorStop(0, `rgba(255,80,30,${a})`); g.addColorStop(0.5, `rgba(255,160,40,${a * 0.5})`); g.addColorStop(1, 'rgba(255,200,60,0)');
+      c.fillStyle = g; c.beginPath(); c.arc(sx, sy, r, 0, Math.PI * 2); c.fill();
+    }
+    c.restore();
+  }
+  /** Fetch the clicked town's details once (cached 60 s); the side panel re-renders when they arrive. */
+  private loadTownInfo(id: number) {
+    if (!this.o.townInfo) return;
+    if (this.tinfo && this.tinfo.id === id && Date.now() - this.tinfo.at < 60_000) return;
+    this.tinfo = { id, at: Date.now(), data: null, loading: true };
+    this.o.townInfo(id).then((d) => { if (this.tinfo?.id === id) { this.tinfo = { id, at: Date.now(), data: d, loading: false }; this.sideKey = ''; this.draw(); } })
+      .catch(() => { if (this.tinfo?.id === id) { this.tinfo.loading = false; this.sideKey = ''; this.draw(); } });
+  }
+  private townInfoHtml(): string {
+    const { L, esc, lang } = this.o;
+    const ti = this.tinfo;
+    if (!ti || ti.id !== this.selected) return '';
+    if (ti.loading) return `<p class="muted small">${esc(L('townLoading'))}</p>`;
+    const d = ti.data;
+    if (!d) return '';
+    const day = (sec: number) => new Date(sec * 1000).toLocaleString(lang === 'el' ? 'el-GR' : 'en-GB', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+    let h = `<h4>${esc(L('townHistory'))}</h4>${d.history.length ? `<ul class="list small">${d.history.map(([t, np, op]) => `<li><span class="muted">${esc(day(t))}</span> ${esc(op || L('ghost'))} → <b>${esc(np || L('ghost'))}</b></li>`).join('')}</ul>` : `<p class="muted small">${esc(L('townNoHistory'))}</p>`}`;
+    if (d.clock) {
+      // Stored per UTC hour; shown in the viewer's local hours.
+      const off = -new Date().getTimezoneOffset() / 60;
+      const loc = Array.from({ length: 24 }, (_, i) => d.clock![(((i - off) % 24) + 24) % 24 | 0] ?? 0);
+      const max = Math.max(1, ...loc);
+      h += `<h4>${esc(L('townClock'))}</h4><div class="clock">${loc.map((n, i) => `<i style="height:${Math.round((n / max) * 100)}%" title="${String(i).padStart(2, '0')}:00 · ${n}"></i>`).join('')}</div><div class="clock-x"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>`;
+    }
+    if (d.troops) h += `<h4>${esc(L('townTroops'))}</h4><p class="small muted">${esc(d.troops.player)}</p><div class="small">${esc(L('inTown'))}: ${unitsAny(d.troops.town.total, this.o.units ?? {}, esc, 18) || '—'}</div>`;
+    if (d.incoming?.length) h += `<h4>${esc(L('townIncoming'))}</h4><ul class="list small">${d.incoming.slice(0, 10).map((x) => `<li>${typeChip(x.cmd.type, L, esc)} ${esc(x.cmd.from_player ?? '?')} · <b>${esc(fmtAt(x.cmd.arrival, lang))}</b></li>`).join('')}</ul>`;
+    return h;
+  }
   private recentCache = { from: -1, to: -1, list: [] as MapPayload['conquests'] };
   private recentConquests(from: number) {
     if (this.recentCache.from !== from || this.recentCache.to !== this.t) {
@@ -390,7 +452,7 @@ export class MapView {
   // ------------------------------------------------------------ side panel (legend, layers, details, conquests)
   private sideKey = '';
   private renderSide(recent: MapPayload['conquests']) {
-    const key = `${this.mode}|${this.t}|${this.windowDays}|${recent.length}|${this.showCmds}|${this.showTargets}|${this.showLabels}|${this.selected}|${this.targets.size}`;
+    const key = `${this.mode}|${this.t}|${this.windowDays}|${recent.length}|${this.showCmds}|${this.showTargets}|${this.showLabels}|${this.showHeat}|${this.selected}|${this.targets.size}`;
     if (key === this.sideKey) return;
     this.sideKey = key;
     const { L, esc } = this.o;
@@ -409,7 +471,8 @@ export class MapView {
       const nIn = this.targets.get(sel.id) ?? 0;
       details = `<section class="det"><h3>${esc(sel.name)} <button class="x" data-close>×</button></h3>
         <p>${sel.pts.toLocaleString()} ${esc(L('points'))}<br>${esc(L('owner'))}: <b>${esc(pn(own.p))}</b><br>${esc(L('alliance'))}: ${esc(an(own.a) || L('noAlliance'))}
-        <br>${esc(L('island'))}: ${sel.ix}|${sel.iy} · ${esc(L('ocean'))} ${String(oceanOf(sel.ix, sel.iy)).padStart(2, '0')}${nIn ? `<br><b class="hot">${esc(L('incomingHere', { n: nIn }))}</b>` : ''}</p></section>`;
+        <br>${esc(L('island'))}: ${sel.ix}|${sel.iy} · ${esc(L('ocean'))} ${String(oceanOf(sel.ix, sel.iy)).padStart(2, '0')}${nIn ? `<br><b class="hot">${esc(L('incomingHere', { n: nIn }))}</b>` : ''}</p>${this.townInfoHtml()}</section>`;
+      this.loadTownInfo(sel.id);
     }
     const list = recent.slice(-40).reverse().map((q) => {
       const tw = this.townById.get(q[1]);
@@ -423,12 +486,13 @@ export class MapView {
       <label class="chk"><input type="checkbox" data-l="cmds" ${this.showCmds ? 'checked' : ''}> ${esc(L('showCommands'))}</label>
       <label class="chk"><input type="checkbox" data-l="targets" ${this.showTargets ? 'checked' : ''}> ${esc(L('highlightTargets'))}</label>
       <label class="chk"><input type="checkbox" data-l="labels" ${this.showLabels ? 'checked' : ''}> ${esc(L('labels'))}</label>
+      <label class="chk" title="${esc(L('heatHint'))}"><input type="checkbox" data-l="heat" ${this.showHeat ? 'checked' : ''}> ${esc(L('heatLayer'))}</label>
       <p class="muted small">${esc(L('zoomHint'))}</p>
       <h3>${esc(L('conquestsAt', { date: this.whenEl.textContent ?? '' }))}</h3>${list ? `<ul class="list">${list}</ul>` : `<p class="muted">${esc(L('noConquests'))}</p>`}
       ${Object.keys(this.data.history).length > 1 ? `<h3>${esc(L('townsChart'))}</h3><canvas class="chart"></canvas>` : ''}`;
     this.side.querySelectorAll<HTMLInputElement>('[data-l]').forEach((cb) => cb.addEventListener('change', () => {
       const k = cb.dataset.l;
-      if (k === 'cmds') this.showCmds = cb.checked; else if (k === 'targets') this.showTargets = cb.checked; else this.showLabels = cb.checked;
+      if (k === 'cmds') this.showCmds = cb.checked; else if (k === 'targets') this.showTargets = cb.checked; else if (k === 'heat') this.showHeat = cb.checked; else this.showLabels = cb.checked;
       this.o.onWantCommands(this.wantsCommands()); this.sideKey = ''; this.draw();
     }));
     this.side.querySelector('[data-close]')?.addEventListener('click', () => { this.selected = null; this.sideKey = ''; this.draw(); });

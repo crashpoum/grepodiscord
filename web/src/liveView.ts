@@ -299,9 +299,9 @@ export class LiveScreen {
     const nf = new Intl.NumberFormat(this.o.lang === 'el' ? 'el-GR' : 'en-GB');
     const btn = (u: string) => { const n = tot.get(u) ?? 0; const name = this.o.units[u] ?? u; return `<button class="${this.f.units.includes(u) ? 'on' : ''}${n ? '' : ' zero'}" data-u="${esc(u)}" title="${esc(`${name}: ${nf.format(n)}`)}">${unitIcon(u, name, 26)}<i>${n ? nf.format(n) : ''}</i></button>`; };
     const ids = [...all].sort(order);
-    const left = ids.filter((u) => ['land', 'hero'].includes(unitDef(u).cat)), right = ids.filter((u) => !['land', 'hero'].includes(unitDef(u).cat));
-    this.el.strip.querySelector('.l')!.innerHTML = `<b class="tl">${esc(L('totalUnits'))}</b>${left.map(btn).join('')}`;
-    this.el.strip.querySelector('.r')!.innerHTML = right.map(btn).join('') + (unknown ? `<span class="unkn" title="${esc(L('unitsUnknown'))}">${esc(L('plusUnknown', { n: unknown }))}</span>` : '');
+    // Label on the left; every icon (land, heroes, ships) and the "+N unknown" note together in ONE right-aligned group that wraps.
+    this.el.strip.querySelector('.l')!.innerHTML = `<b class="tl">${esc(L('totalUnits'))}</b>`;
+    this.el.strip.querySelector('.r')!.innerHTML = ids.map(btn).join('') + (unknown ? `<span class="unkn" title="${esc(L('unitsUnknown'))}">${esc(L('plusUnknown', { n: unknown }))}</span>` : '');
   }
   private renderSide() {
     const { L, esc } = this.o;

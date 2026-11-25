@@ -7,6 +7,8 @@ import { GrepoDataClient } from '../src/data/grepodata.js';
 import { createWebApp } from '../src/web/server.js';
 import { townXY } from '../web/src/geo.js';
 import { issueSession } from '../src/web/auth.js';
+import { AdminService } from '../src/admin/service.js';
+import { runtime, type BotBridge } from '../src/bridge.js';
 
 const W = process.env.SMOKE_WORLD ?? 'gr125';
 const LANG = (process.env.SMOKE_LANG as 'en' | 'el') ?? 'el';
@@ -62,6 +64,7 @@ const fakeGd = (async (u: string) => {
   if (url.includes('getindex')) return j({ total_reports: 1234, spy_reports: 210, enemy_attacks: 77, latest_intel: [{ town_id: them[0].id, town_name: them[0].name, player_name: 'Enemy', alliance_name: top[1].name, date: '24-11-26 20:01:00', units: [{ name: 'hoplite', count: 340 }, { name: 'archer', count: 120 }] }] });
   return j({ success: false });
 }) as typeof fetch;
+const OWNER = '100000000000000001';
 const ctx = { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fakeGd) };
 // Strategy drawings: a few demo shapes near our towns (+ SMOKE_MARKS random ones for perf checks).
 {
@@ -86,7 +89,7 @@ const ctx = { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fakeGd)
     add(`R${i % 9}`, `Player${i % 9}`, k, ['#ff3b3b', '#ffd23f', '#3d8bff', '#22c7c7'][i % 4], 4, pts, k === 'text' ? `note ${i}` : '');
   }
 }
-// GrepoGod troop snapshots (realistic fake data for the Troops tab).
+// Synced troop snapshots (realistic fake data for the Troops tab).
 {
   const xyTowns = (aid: number) => townsOf(aid);
   const pick = (aid: number, i: number) => {
@@ -111,7 +114,7 @@ const ctx = { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fakeGd)
   };
   const o0 = ours[0], o1 = ours[Math.min(3, ours.length - 1)], o2 = ours[Math.min(7, ours.length - 1)];
   const o3 = ours[Math.min(11, ours.length - 1)];
-  add('U1', 9001, 'Smoke', 0.4, [
+  add(OWNER, 9001, 'Smoke', 0.4, [
     { t: o0, home: { sword: 420, slinger: 800, hoplite: 210, catapult: 8 }, outer: { bireme: 40, attack_ship: 12 }, sup: { hoplite: 150, archer: 80 }, ...wall(25, 26, 55), res: res(15000, 18600, 3000, 30600, 209), spells: sp(['happiness', 180], ['town_protection', 320], ['call_of_the_ocean']) },
     { t: o1, home: { rider: 180, chariot: 40, archer: 300 }, outer: { small_transporter: 20, slinger: 200 }, sup: {}, ...wall(20), res: res(8200, 9100, 6400, 18600, 80), spells: sp(['fertility_improvement', 90], ['pest', 40]) },
     { t: o2, home: { manticore: 6, griffin: 4, harpy: 20, sword: 50 }, outer: {}, sup: { hoplite: 400 }, ...wall(22, 21, 120), res: res(26000, 30600, 14000, 30600, 12), spells: [] },
@@ -127,10 +130,68 @@ const ctx = { store, worlds, gd: new GrepoDataClient('https://gd', 1000, fakeGd)
     { t: pick(top[0].id, 14), home: { hercules: 1, hoplite: 300, archer: 200 }, outer: {}, sup: { slinger: 50 }, ...wall(19), res: res(13000, 9000, 11000, 18600, 22), spells: [] },
   ]);
 }
-const app = createWebApp({ ctx, guilds: { has: () => true, name: () => 'Smoke server', manager: async () => true }, secret: 's'.repeat(32) });
+// Synced incoming + ops feeds: the real client sample shapes, moved onto real towns and shifted to "now".
+{
+  const nowMs = Date.now(), nowSec = Math.floor(nowMs / 1000);
+  const t = (i: number) => ours[i % ours.length], e = (i: number) => them[i % them.length];
+  const ep = (i: number) => snap.players.get(e(i).playerId!)!;
+  const an = (id: number | null | undefined) => (id ? snap.alliances.get(id)?.name : undefined);
+  const inc = (i: number, type: string, inSec: number, pred?: unknown) => ({ id: `${9000 + i}`, town_id: t(i).id, town_n: t(i).name, type, arrival: nowSec + inSec, from_town_id: e(i).id, from_town_n: e(i).name,
+    from_player_id: ep(i).id, from_player: ep(i).name, from_alliance: an(ep(i).allianceId), started: nowSec - 900, ...(pred ? { pred } : {}) });
+  const cmdsA = [
+    inc(1, 'attack', 640, { kind: 'naval', conf: 0.86, units: ['bireme', 'attack_ship'], groups: [{ pct: 86, units: ['bireme', 'attack_ship'] }, { pct: 40, units: ['trireme'] }, { pct: 12, units: ['colonize_ship'] }] }),
+    inc(2, 'conquest', 1900, { kind: 'colo', conf: 0.91, units: ['colonize_ship'], groups: [{ pct: 91, units: ['colonize_ship'] }], note: 'approximate travel time; Possible colony ship' }),
+    inc(3, 'revolt', 3300),
+    inc(4, 'attack', 200, { kind: 'land', conf: 0.7, units: ['slinger', 'sword', 'catapult'], groups: [{ pct: 70, units: ['slinger', 'sword', 'catapult'] }, { pct: 30, units: ['rider', 'chariot'] }] }),
+    { id: '9100', town_id: t(0).id, town_n: t(0).name, type: 'support', arrival: nowSec + 420, from_town_id: t(5).id, from_town_n: t(5).name, from_player: snap.players.get(t(5).playerId!)!.name, started: nowSec - 60 },
+  ];
+  const cmdsB = [inc(6, 'attack', 95, { kind: 'land', conf: 0.55, units: ['hoplite', 'archer'], groups: [{ pct: 55, units: ['hoplite', 'archer'] }], note: 'approximate travel time' }), inc(7, 'spy', 1200)];
+  store.putFeed({ guildId: 'G1', world: W, kind: 'incoming', playerId: 9001, playerName: 'Smoke', userId: OWNER, ts: nowMs - 20_000, recvAt: nowMs - 20_000, itemsJson: JSON.stringify(cmdsA) });
+  store.putFeed({ guildId: 'G1', world: W, kind: 'incoming', playerId: 9002, playerName: 'Leonidas_GR', userId: 'U2', ts: nowMs - 70_000, recvAt: nowMs - 70_000, itemsJson: JSON.stringify(cmdsB) });
+  const op = (id: string, kind: string, i: number, status: string, sendIn: number, flightSec: number, units: Record<string, number>, extra: Record<string, unknown> = {}) => ({ id, kind, from_town_id: t(i).id, from_town_n: t(i).name,
+    target_town_id: (kind === 'support' ? t(i + 3) : e(i)).id, target_town_n: (kind === 'support' ? t(i + 3) : e(i)).name, target_player: snap.players.get((kind === 'support' ? t(i + 3) : e(i)).playerId!)?.name,
+    send_at: nowSec + sendIn, arrive_at: nowSec + sendIn + flightSec, status, units, ...extra });
+  const opsA = [
+    op('cpend1', 'attack', 0, 'scheduled', 3600, 3600, { hoplite: 200, slinger: 50 }), op('cpend2', 'attack', 1, 'scheduled', 1800, 2700, { attack_ship: 40 }),
+    op('csup1', 'support', 2, 'scheduled', 2990, 2000, { bireme: 10 }),
+    op('csent1', 'attack', 3, 'sent', -400, 810, { sword: 80 }, { sent_at: nowSec - 398, arrival: nowSec + 412 }),
+    op('csent2', 'attack', 4, 'sent', -1200, 600, { rider: 120, chariot: 20 }, { sent_at: nowSec - 1199, arrival: nowSec - 598 }),
+    op('cfail1', 'attack', 5, 'failed', -160, 60, { archer: 10 }, { reason: 'the window had passed' }),
+  ];
+  const opsB = [op('lsup', 'support', 6, 'scheduled', 600, 1200, { hoplite: 300 }), op('lfail', 'attack', 7, 'failed', -50, 900, { catapult: 5, sword: 100 }, { reason: 'not enough units in town' })];
+  // A support landing on the same town as an attack within 1 s (clash hint).
+  opsB.push({ ...op('lclash', 'support', 0, 'scheduled', 3000, 4200, { archer: 100 }), target_town_id: opsA[0].target_town_id, target_town_n: opsA[0].target_town_n, arrive_at: opsA[0].arrive_at });
+  store.putFeed({ guildId: 'G1', world: W, kind: 'ops', playerId: 9001, playerName: 'Smoke', userId: OWNER, ts: nowMs - 30_000, recvAt: nowMs - 30_000, itemsJson: JSON.stringify(opsA) });
+  store.putFeed({ guildId: 'G1', world: W, kind: 'ops', playerId: 9002, playerName: 'Leonidas_GR', userId: 'U2', ts: nowMs - 90_000, recvAt: nowMs - 90_000, itemsJson: JSON.stringify(opsB) });
+  // Admin panel content: an admin, a grant, a pending /iam claim, members seen, a link, an audit line, an announcement, a guest link.
+  store.addAdmin('G1', '200000000000000002', 'Leonidas', OWNER, nowMs - 86400_000);
+  store.addGrant({ guildId: 'G1', kind: 'user', targetId: '300000000000000003', scope: 'ops', expiresAt: nowMs + 86400_000, createdBy: OWNER, createdAt: nowMs - 3600_000 });
+  store.addGrant({ guildId: 'G1', kind: 'role', targetId: '700000000000000001', scope: 'alerts', expiresAt: null, createdBy: OWNER, createdAt: nowMs - 7200_000 });
+  const mem = [...snap.players.values()].filter((p) => p.allianceId === top[0].id).slice(0, 6);
+  store.setClaim({ guildId: 'G1', userId: '400000000000000004', userName: 'ariadne_dc', world: W, playerId: mem[1].id, status: 'pending', source: 'iam', createdAt: nowMs - 600_000 });
+  store.seeMember('G1', '500000000000000005', mem[2].name, nowMs);
+  store.seeMember('G1', '500000000000000006', mem[3].name.toLowerCase(), nowMs);
+  store.seeMember('G1', OWNER, 'crashpoum', nowMs);
+  store.setLink({ guildId: 'G1', userId: OWNER, world: W, playerId: mem[0].id, verifiedAt: nowMs - 5 * 86400_000 });
+  store.audit('G1', OWNER, 'crashpoum', 'grants.add', 'kind=user scope=ops preset=1d', nowMs - 3600_000);
+  store.audit('G1', '200000000000000002', 'Leonidas', 'settings.save', 'alerts', nowMs - 1800_000);
+  store.addAnnouncement({ guildId: 'G1', channelId: '600000000000000002', text: 'Night op tonight 22:00, everyone online please', postAt: nowMs + 5 * 3600_000, createdBy: OWNER, createdAt: nowMs });
+  store.addGuestLink({ id: 'gst1', guildId: 'G1', label: 'Pact leader (HDNW)', createdBy: OWNER, createdAt: nowMs - 3600_000, expiresAt: nowMs + 20 * 3600_000 });
+  for (const h of [18, 19, 19, 20, 20, 20, 21, 21, 6, 7, 12]) store.bumpPlayerHours(W, [snap.players.get(ours[0].playerId!)!.id], h);
+}
+const bridge: BotBridge = {
+  post: async () => 'm1', edit: async () => true, memberRoles: async () => [], members: async () => null, userName: async () => null, syncRoles: async () => undefined,
+  channels: () => [{ id: '600000000000000001', name: 'alerts' }, { id: '600000000000000002', name: 'general' }, { id: '600000000000000003', name: 'admins' }, { id: '600000000000000004', name: 'war-room' }],
+  roles: () => [{ id: '700000000000000001', name: 'Officers', color: '#e67e22' }, { id: '700000000000000002', name: 'Members', color: '#3498db' }, { id: '700000000000000003', name: 'Pact', color: '#1abc9c' }],
+};
+runtime.bridge = bridge;
+const admin = new AdminService(ctx, 's'.repeat(32), Date.now, new Set([OWNER]), () => bridge);
+admin.saveSettings('G1', { alerts: { channelId: '600000000000000001', roleId: '700000000000000001', minSize: 0, types: ['attack', 'conquest', 'revolt'] }, trackers: { board: { on: true, channelId: '600000000000000004' }, conquests: { on: true, channelId: '600000000000000004' }, ghosts: { on: false, channelId: null, radius: 15 } }, linking: { adminChannelId: '600000000000000003', unconfirmed: 'basic', allowAnyAlliance: false } });
+const app = createWebApp({ ctx, guilds: { has: () => true, name: () => 'Smoke server', manager: async () => true }, secret: 's'.repeat(32), admin });
 http.createServer(app.handler).listen(PORT, () => {
-  const tok = issueSession('s'.repeat(32), { u: 'U1', g: 'G1', n: 'Smoke' });
+  const tok = issueSession('s'.repeat(32), { u: OWNER, g: 'G1', n: 'Smoke' });
   console.log(`LIVE   http://localhost:${PORT}/go/live?t=${tok}`);
   console.log(`MAP    http://localhost:${PORT}/go/map?t=${tok}`);
   console.log(`TROOPS http://localhost:${PORT}/go/troops?t=${tok}`);
+  for (const t of ['alerts', 'ops', 'admin', 'mini']) console.log(`${t.toUpperCase().padEnd(6)} http://localhost:${PORT}/go/${t}?t=${tok}`);
 });

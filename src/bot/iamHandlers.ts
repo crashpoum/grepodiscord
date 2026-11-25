@@ -12,7 +12,7 @@ import { resolvePlayer, type Ctx } from '../services.js';
 import { DEFAULT_SETTINGS } from '../admin/settings.js';
 import { claimAllowed, confirmLink, createClaim } from '../admin/linking.js';
 import { clockBar, liveBoardPayload, trackerSides, tzOffsetMin } from './trackers.js';
-import { syncGuildRoles } from './poster.js';
+import { resolveGuild, syncGuildRoles } from './poster.js';
 import { LINK_HOURS, webSecret } from '../web/auth.js';
 import { dashboardLink } from '../web/server.js';
 
@@ -23,7 +23,7 @@ const displayName = (i: ChatInputCommandInteraction | ButtonInteraction) => (i.m
 const isBotAdmin = (g: string, u: string) => runtime.admin?.isBotAdmin(g, u) ?? false;
 
 export async function handleIam(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang, world: string) {
-  if (!i.guildId || !i.guild) throw new UserError('err.guildOnly');
+  if (!i.guildId) throw new UserError('err.guildOnly');
   await i.deferReply({ flags: MessageFlags.Ephemeral });
   const snap = await ctx.worlds.ensure(world);
   const q = i.options.getString('player', true);
@@ -37,7 +37,8 @@ export async function handleIam(ctx: Ctx, i: ChatInputCommandInteraction, lang: 
   if (isBotAdmin(i.guildId, i.user.id)) {
     const r = confirmLink(ctx.store, i.guildId, i.user.id, world, p.id, i.user.id, now);
     if (!r.ok) return void (await i.editReply({ embeds: [{ description: t(lang, 'verify.taken', { player: p.name }), color: 0xed4245 }] }));
-    await syncGuildRoles(ctx, i.guild, [i.user.id]).catch(() => undefined);
+    const guild = await resolveGuild(i);
+    if (guild) await syncGuildRoles(ctx, guild, [i.user.id]).catch(() => undefined);
     return void (await i.editReply({ embeds: [{ description: t(lang, 'iam.confirmed', { player: p.name, world }), color: 0x57f287 }] }));
   }
   const r = createClaim(ctx.store, { guildId: i.guildId, userId: i.user.id, userName: displayName(i), world, playerId: p.id, source: 'iam' }, now);
@@ -69,7 +70,8 @@ export async function handleIamButton(ctx: Ctx, i: ButtonInteraction) {
   if (verb === 'ok') {
     const r = confirmLink(ctx.store, i.guildId, userId, c.world, c.playerId, i.user.id, now);
     if (!r.ok) return void (await i.reply({ embeds: [{ description: t(lang, 'iam.takenNow'), color: 0xed4245 }], flags: MessageFlags.Ephemeral }));
-    if (i.guild) await syncGuildRoles(ctx, i.guild, [userId]).catch(() => undefined);
+    const guild = await resolveGuild(i);
+    if (guild) await syncGuildRoles(ctx, guild, [userId]).catch(() => undefined);
     note = t(lang, 'iam.approvedBy', { user: displayName(i) });
   } else {
     ctx.store.decideClaim(i.guildId, userId, 'rejected', i.user.id, now);

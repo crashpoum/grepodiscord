@@ -22,6 +22,12 @@ export async function postFeedEvents(client: Client, ctx: Ctx, ev: RefreshEvents
   }
 }
 
+/** Cached guild, or fetched by id when the cache missed (Guilds intent only can leave i.guild null). */
+export async function resolveGuild(i: { guild: Guild | null; guildId: string | null; client: { guilds: { fetch: (id: string) => Promise<Guild> } } }): Promise<Guild | null> {
+  if (i.guild) return i.guild;
+  return i.guildId ? i.client.guilds.fetch(i.guildId).catch(() => null) : null;
+}
+
 /**
  * Sync managed roles for linked members of a guild (all, or only `userIds`).
  * Only roles configured via /roles are ever added/removed.

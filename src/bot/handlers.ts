@@ -9,7 +9,7 @@ import { t, type Lang, fmt } from '../i18n.js';
 import { DEFAULT_MIN_BP, type FeedFilter, type FeedType } from '../feeds.js';
 import { generateCode } from '../verify.js';
 import { allianceCard, checkVerification, playerCard, radarGhosts, radarInactive, resolveAlliance, resolvePlayer, type Ctx } from '../services.js';
-import { syncGuildRoles } from './poster.js';
+import { resolveGuild, syncGuildRoles } from './poster.js';
 import { gdAdmin, gdIntel, gdPublic } from './gdHandlers.js';
 import { classifyError, logError, safeEmbed } from './errors.js';
 import { handleOp, handleAlerts, handleWarroom, opAutocomplete } from './opsHandlers.js';
@@ -216,7 +216,7 @@ async function feed(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
 }
 
 async function verify(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
-  if (!i.guildId || !i.guild) return reply(i, msg(t(lang, 'err.guildOnly'), COLOR_ERR), true);
+  if (!i.guildId) return reply(i, msg(t(lang, 'err.guildOnly'), COLOR_ERR), true);
   const sub = i.options.getSubcommand();
   const g = ctx.store.getGuild(i.guildId);
   if (sub === 'status') {
@@ -228,7 +228,8 @@ async function verify(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
   if (sub === 'unlink') {
     ctx.store.removeLink(i.guildId, i.user.id);
     ctx.store.removePending(i.guildId, i.user.id);
-    await syncGuildRoles(ctx, i.guild, [i.user.id]).catch(() => undefined);
+    const guild = await resolveGuild(i);
+    if (guild) await syncGuildRoles(ctx, guild, [i.user.id]).catch(() => undefined);
     return reply(i, msg(t(lang, 'verify.unlinked')), true);
   }
   if (sub === 'start') {
@@ -253,7 +254,8 @@ async function verify(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
   const r = await checkVerification(ctx, pending);
   const name = ctx.worlds.get(pending.world)?.players.get(pending.playerId)?.name ?? `#${pending.playerId}`;
   if (r.status === 'ok') {
-    await syncGuildRoles(ctx, i.guild, [i.user.id]).catch((e) => log.warn(`role sync after verify: ${e}`));
+    const guild = await resolveGuild(i);
+    if (guild) await syncGuildRoles(ctx, guild, [i.user.id]).catch((e) => log.warn(`role sync after verify: ${e}`));
     return reply(i, msg(t(lang, 'verify.ok', { player: r.player.name, world: pending.world })));
   }
   if (r.status === 'expired') return reply(i, msg(t(lang, 'verify.expired'), COLOR_ERR));
@@ -264,7 +266,7 @@ async function verify(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
 }
 
 async function roles(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
-  if (!i.guildId || !i.guild) return reply(i, msg(t(lang, 'err.guildOnly'), COLOR_ERR), true);
+  if (!i.guildId) return reply(i, msg(t(lang, 'err.guildOnly'), COLOR_ERR), true);
   const sub = i.options.getSubcommand();
   const g = ctx.store.getGuild(i.guildId, config.defaultLang);
   if (sub === 'verified') {
@@ -279,7 +281,8 @@ async function roles(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
   }
   if (sub === 'sync') {
     await i.deferReply({ flags: MessageFlags.Ephemeral });
-    const r = await syncGuildRoles(ctx, i.guild);
+    const guild = await resolveGuild(i);
+    const r = guild ? await syncGuildRoles(ctx, guild) : { changed: 0, errors: 0 };
     return reply(i, msg(t(lang, 'roles.synced', { changed: r.changed, errors: r.errors })));
   }
   const world = await requireWorld(ctx, i, lang);

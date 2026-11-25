@@ -46,6 +46,7 @@ export class MapView {
   private selected: number | null = null;
   private commands: LiveCommand[] = [];
   private targets = new Map<number, number>();
+  private targetsSig = '';
   private showCmds = false; private showTargets = true; private showLabels = true; private showHeat = false;
   private tinfo: { id: number; at: number; data: TownPanel | null; loading: boolean } | null = null;
   private raf = 0; dpr = 1;
@@ -55,6 +56,7 @@ export class MapView {
   hoverExtra: ((sx: number, sy: number) => string | null) | null = null;
   get scale() { return this.view.scale; }
   private tiles = new Map<string, HTMLCanvasElement | OffscreenCanvas>();
+  private tilesInView = 0;
   private pointers = new Map<number, { x: number; y: number }>();
   private labelsA: { id: number; x: number; y: number; n: number }[] = [];
   private perf: number[] = [];
@@ -108,7 +110,8 @@ export class MapView {
     this.commands = c;
     this.targets.clear();
     for (const x of c) if (x.trg.townId && x.side === 'in') this.targets.set(x.trg.townId, (this.targets.get(x.trg.townId) ?? 0) + 1);
-    this.sideKey = '';
+    const sig = [...this.targets].map(([k, v]) => `${k}:${v}`).join(',');
+    if (sig !== this.targetsSig) { this.targetsSig = sig; this.sideKey = ''; }
     this.draw();
   }
   /** Paint timings (ms) of the last frames, for the perf report. */
@@ -128,9 +131,13 @@ export class MapView {
   private fitSpan = 200;
   private resize() {
     const r = this.canvas.parentElement!.getBoundingClientRect();
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this.canvas.width = Math.max(1, Math.floor(r.width * this.dpr));
-    this.canvas.height = Math.max(1, Math.floor(r.height * this.dpr));
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = Math.max(1, Math.floor(r.width * dpr)), H = Math.max(1, Math.floor(r.height * dpr));
+    // Assigning width/height clears the canvas: only do it when the size really changed (no blank frames).
+    if (dpr !== this.dpr) this.tiles.clear();
+    this.dpr = dpr;
+    if (this.canvas.width !== W) this.canvas.width = W;
+    if (this.canvas.height !== H) this.canvas.height = H;
     if (!this.view.scale) this.view.scale = Math.min(r.width, r.height) / this.fitSpan;
     this.draw();
   }
@@ -173,9 +180,12 @@ export class MapView {
     const isl = this.isl;
     if (isl && k < 3) {
       // Far zoom: islands are a few pixels, so write them straight into the pixel buffer (no paths): ~40k islands in a few ms.
-      const img = c.getImageData(0, 0, px, px), buf = new Uint32Array(img.data.buffer);
+      // Never read pixels back (Brave's fingerprinting protection adds random noise to getImageData, so tiles would
+      // differ on every render and flicker): start from a fresh buffer filled with the sea colour.
+      const img = c.createImageData(px, px), buf = new Uint32Array(img.data.buffer);
       const le = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
       const rgba = (hex: string) => { const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255; return le ? (255 << 24) | (b << 16) | (g << 8) | r : (r << 24) | (g << 16) | (b << 8) | 255; };
+      buf.fill(rgba(SEA));
       const colS = rgba(SAND), colG = rgba(GRASS), colR = rgba(ROCK);
       this.islGrid.each(wx0 - 1, wy0 - 1, wx0 + span + 1, wy0 + span + 1, (i) => {
         const cls = islandClass(isl.types[i]);
@@ -215,7 +225,7 @@ export class MapView {
     if (!mayRender) return null;
     const nt = this.renderTile(z, tx, ty);
     this.tiles.set(key, nt);
-    while (this.tiles.size > MAX_TILES) this.tiles.delete(this.tiles.keys().next().value!);
+    while (this.tiles.size > Math.max(MAX_TILES, this.tilesInView * 2 + 8)) this.tiles.delete(this.tiles.keys().next().value!);
     return nt;
   }
 
@@ -230,6 +240,7 @@ export class MapView {
     // 1. static tiles
     const z = this.tileZ(), span = TILE / 2 ** z;
     let budget = NEW_TILES_PER_FRAME, missing = false;
+    this.tilesInView = (Math.floor(wx1 / span) - Math.floor(wx0 / span) + 1) * (Math.floor(wy1 / span) - Math.floor(wy0 / span) + 1);
     c.imageSmoothingEnabled = true;
     for (let tx = Math.floor(wx0 / span); tx <= Math.floor(wx1 / span); tx++) for (let ty = Math.floor(wy0 / span); ty <= Math.floor(wy1 / span); ty++) {
       const cached = this.tiles.has(`${z}:${tx}:${ty}`);
@@ -509,8 +520,11 @@ export class MapView {
     const mine = (id: number) => sideOf(1, id, s);
     const show = [...ids].filter((id) => mine(id) !== 'other').concat([...ids].filter((id) => mine(id) === 'other').slice(0, 4)).slice(0, 8);
     const r = cv.getBoundingClientRect(), dpr = this.dpr;
-    cv.width = r.width * dpr; cv.height = r.height * dpr;
+    const cw = Math.round(r.width * dpr), chh = Math.round(r.height * dpr);
+    if (cv.width !== cw) cv.width = cw;
+    if (cv.height !== chh) cv.height = chh;
     const c = cv.getContext('2d')!;
+    c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, cv.width, cv.height);
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     let max = 1;
     for (const d of days) for (const id of show) max = Math.max(max, this.data.history[d][id] ?? 0);

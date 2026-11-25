@@ -55,5 +55,10 @@ export const config = {
   /** Official Grepolis image CDN for unit/command icons (proxied + cached by the web server, never committed). Empty = own icons only. */
   grepolisCdn: (env.GREPOLIS_CDN ?? 'https://gpnl.innogamescdn.com').trim().replace(/\/+$/, ''),
   privacyContact: env.PRIVACY_CONTACT ?? '',
+  /**
+   * Bot owner(s): Discord user id(s), comma-separated. Only they can add or remove admin-panel admins and restore
+   * backups. Without it, nobody can open /admin (server managers still use the slash commands).
+   */
+  ownerUserIds: (env.OWNER_USER_ID ?? '').split(/[\s,]+/).filter((x) => /^\d{5,25}$/.test(x)),
   logLevel: env.LOG_LEVEL ?? 'info',
 };

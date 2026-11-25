@@ -21,6 +21,18 @@ interface GuildLive {
   teams: LiveTeam[]; teamsAt: number; cmds: Map<string, Map<string, GdSharedCommand>>; since: Map<string, number>;
   overview: Map<string, { at: number; data: GdIndexOverview }>; updatedAt: number | null; err: { key: StringKey; vars: Record<string, string | number> } | null;
   failures: number; lastPollAt: number | null; nextPollAt: number | null; intervalSec: number; lastCount: number | null; lastLog: string;
+  /** Last read by a chat board / tracker (polls slowly, at most once a minute, while only these watch). */
+  passiveAt: number; manualAt: number; allTeams: LiveTeam[];
+}
+/** Per-guild overrides from the admin panel (poll speed, which command-share teams to follow). */
+export interface LiveGuildOpts { pollSeconds?: number | null; teams?: string[] | null }
+export const MANUAL_COOLDOWN_MS = 10_000;
+export const PASSIVE_IDLE_MS = 3 * 60_000;
+export const PASSIVE_MIN_SEC = 60;
+/** Manual refresh gate: one per guild every 10 s, never while a poll runs. Returns the wait in ms (0 = go). */
+export function manualWait(lastAt: number, busy: boolean, now: number, cooldown = MANUAL_COOLDOWN_MS): number {
+  if (busy) return 1000;
+  return Math.max(0, lastAt + cooldown - now);
 }
 
 /** Which kind of problem an error key is, for the client banner. */
@@ -122,14 +134,50 @@ export class Budget {
 export class LiveHub {
   private g = new Map<string, GuildLive>();
   readonly budget: Budget;
+  /** Admin-panel overrides per guild (set by the web app); default none. */
+  guildOpts: (guildId: string) => LiveGuildOpts = () => ({});
   constructor(private ctx: Ctx, private sides: (guildId: string, world: string) => Promise<number[]>, private opts = { pollSeconds: config.livePollSeconds, rpm: config.liveRpm, now: Date.now }) {
     this.budget = new Budget(opts.rpm, opts.now);
   }
+  private pollSecondsOf(guildId: string): number {
+    const v = Number(this.guildOpts(guildId).pollSeconds);
+    return Number.isFinite(v) && v > 0 ? Math.min(120, Math.max(3, Math.round(v))) : this.opts.pollSeconds;
+  }
+  private watched(s: GuildLive): 'active' | 'passive' | null {
+    const n = this.opts.now();
+    if (n - s.viewerAt <= IDLE_AFTER) return 'active';
+    if (n - s.passiveAt <= PASSIVE_IDLE_MS) return 'passive';
+    return null;
+  }
+  /** "Refresh now" (Discord button / web button): one per guild every 10 s, inside the same GrepoData budget. */
+  refreshNow(guildId: string): { ok: true } | { ok: false; waitMs: number } {
+    const s = this.state(guildId);
+    const wait = manualWait(s.manualAt, s.busy, this.opts.now());
+    if (wait > 0) return { ok: false, waitMs: wait };
+    s.manualAt = this.opts.now();
+    s.viewerAt = Math.max(s.viewerAt, this.opts.now() - IDLE_AFTER + 30_000); // keep it alive for 30 s
+    this.schedule(guildId, 0);
+    return { ok: true };
+  }
+  /** Admin panel: clear errors/backoff and poll again now (also re-reads the team list). */
+  restart(guildId: string) {
+    const s = this.state(guildId);
+    s.err = null; s.failures = 0; s.teamsAt = 0; s.manualAt = 0;
+    s.viewerAt = Math.max(s.viewerAt, this.opts.now() - IDLE_AFTER + 30_000);
+    if (!s.busy) this.schedule(guildId, 0);
+  }
+  /** Health summary for the admin panel. */
+  health(guildId: string) {
+    const s = this.g.get(guildId);
+    if (!s) return { state: 'idle', lastPollAt: null, lastOkAt: null, nextPollAt: null, intervalSec: this.pollSecondsOf(guildId), teams: [] as LiveTeam[], allTeams: [] as LiveTeam[], error: null as string | null, failures: 0, watched: null as string | null, budgetUsed: this.budget.used() };
+    return { state: s.err ? 'error' : s.updatedAt ? 'ok' : 'warming', lastPollAt: s.lastPollAt, lastOkAt: s.updatedAt, nextPollAt: s.nextPollAt, intervalSec: s.intervalSec || this.pollSecondsOf(guildId),
+      teams: s.teams, allTeams: s.allTeams, error: s.err ? s.err.key : null, failures: s.failures, watched: this.watched(s), budgetUsed: this.budget.used() };
+  }
 
   /** The cached snapshot for a guild; marks a viewer so polling starts (or keeps running). Never calls GrepoData itself. */
-  async view(guildId: string, lang: Lang): Promise<LiveView> {
+  async view(guildId: string, lang: Lang, passive = false): Promise<LiveView> {
     const s = this.state(guildId);
-    s.viewerAt = this.opts.now();
+    if (passive) s.passiveAt = this.opts.now(); else s.viewerAt = this.opts.now();
     if (!s.timer && !s.busy) this.schedule(guildId, 0);
     const world = s.world ?? this.ctx.store.getGuild(guildId).world;
     const ours = new Set(world ? await this.sides(guildId, world).catch(() => [] as number[]) : []);
@@ -176,7 +224,7 @@ export class LiveHub {
     let s = this.g.get(guildId);
     if (!s) {
       s = { world: null, viewerAt: 0, timer: null, busy: false, polls: 0, teams: [], teamsAt: 0, cmds: new Map(), since: new Map(), overview: new Map(), updatedAt: null, err: null,
-        failures: 0, lastPollAt: null, nextPollAt: null, intervalSec: 0, lastCount: null, lastLog: '' };
+        failures: 0, lastPollAt: null, nextPollAt: null, intervalSec: 0, lastCount: null, lastLog: '', passiveAt: 0, manualAt: 0, allTeams: [] };
       this.g.set(guildId, s);
     }
     return s;
@@ -194,7 +242,7 @@ export class LiveHub {
   async tick(guildId: string): Promise<void> {
     const s = this.state(guildId);
     if (s.busy) return;
-    if (this.opts.now() - s.viewerAt > IDLE_AFTER) { log.debug(`live: guild ${guildId} idle, polling paused`); return; }
+    if (!this.watched(s)) { log.debug(`live: guild ${guildId} idle, polling paused`); return; }
     s.busy = true;
     s.lastPollAt = this.opts.now();
     try {
@@ -208,9 +256,11 @@ export class LiveHub {
       const p = problemOf(s.err?.key);
       // A full budget is not a failure (just wait); token/team problems and errors back off.
       s.failures = s.err && p !== 'busy' ? s.failures + 1 : 0;
-      s.intervalSec = pollInterval(this.opts.pollSeconds, this.opts.rpm, s.teams.length, s.failures, s.err?.key === 'gd.rateLimited');
+      s.intervalSec = pollInterval(this.pollSecondsOf(guildId), this.opts.rpm, s.teams.length, s.failures, s.err?.key === 'gd.rateLimited');
       this.logResult(guildId, s);
-      if (this.opts.now() - s.viewerAt <= IDLE_AFTER) this.schedule(guildId, s.intervalSec * 1000);
+      const w = this.watched(s);
+      // Only a chat board is reading: poll at most once a minute (stays well inside the budget).
+      if (w) this.schedule(guildId, (w === 'passive' ? Math.max(PASSIVE_MIN_SEC, s.intervalSec) : s.intervalSec) * 1000);
       else s.nextPollAt = null;
     }
   }
@@ -240,7 +290,9 @@ export class LiveHub {
       if (!this.budget.take()) { s.err = { key: 'web.err.busy', vars: {} }; return; }
       const r = await withGuildToken(this.ctx, guildId, '', (tok) => gd.commandTeams(tok, guildId));
       s.teamsAt = now;
-      const ops = (r.value?.operations ?? []).filter((o) => o.world === world && o.index && o.active !== false).slice(0, MAX_TEAMS);
+      const pick = this.guildOpts(guildId).teams;
+      s.allTeams = (r.value?.operations ?? []).filter((o) => o.world === world && o.index).map((o) => ({ key: o.index, name: str(o.team) || o.index, commands: Number(o.commands) || 0, players: Number(o.players) || 0 }));
+      const ops = (r.value?.operations ?? []).filter((o) => o.world === world && o.index && o.active !== false && (!pick?.length || pick.includes(o.index))).slice(0, MAX_TEAMS);
       s.teams = ops.map((o) => ({ key: o.index, name: str(o.team) || o.index, commands: Number(o.commands) || 0, players: Number(o.players) || 0 }));
       for (const k of [...s.cmds.keys()]) if (!s.teams.some((x) => x.key === k)) { s.cmds.delete(k); s.since.delete(k); s.overview.delete(k); }
     }

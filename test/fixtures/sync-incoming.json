@@ -1,0 +1,105 @@
+{
+  "v": 1,
+  "world": "gr125",
+  "player_id": 7,
+  "player_name": "crashpoum99",
+  "ts": 1795566386654,
+  "cmds": [
+    {
+      "id": 9100,
+      "town_id": 11,
+      "town_n": "Akropolis",
+      "type": "support",
+      "arrival": 1795566786,
+      "from_town_id": 200,
+      "from_town_n": "FriendVille",
+      "from_player_id": 77,
+      "from_player": "AllyBob",
+      "started": 1795566336
+    },
+    {
+      "id": 9003,
+      "town_id": 12,
+      "town_n": "Sparti",
+      "type": "revolt",
+      "arrival": 1795568186,
+      "from_town_id": 77,
+      "from_town_n": "X",
+      "from_player_id": 42,
+      "from_player": "papasn55",
+      "from_alliance": "HDNW",
+      "started": 1795566286
+    },
+    {
+      "id": 9001,
+      "town_id": 11,
+      "town_n": "Akropolis",
+      "type": "attack",
+      "arrival": 1795569986,
+      "from_town_id": 77,
+      "from_town_n": "ChakhPihNish",
+      "from_player_id": 42,
+      "from_player": "papasn55",
+      "from_alliance": "HDNW",
+      "started": 1795559186,
+      "pred": {
+        "kind": "naval",
+        "conf": 0.86,
+        "units": [
+          "bireme",
+          "attack_ship"
+        ],
+        "groups": [
+          {
+            "pct": 86,
+            "units": [
+              "bireme",
+              "attack_ship"
+            ]
+          },
+          {
+            "pct": 40,
+            "units": [
+              "trireme"
+            ]
+          },
+          {
+            "pct": 12,
+            "units": [
+              "colonize_ship"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 9002,
+      "town_id": 11,
+      "town_n": "Akropolis",
+      "type": "conquest",
+      "arrival": 1795574386,
+      "from_town_id": 88,
+      "from_town_n": "EnemyPort",
+      "from_player_id": 99,
+      "from_player": "colonizer",
+      "from_alliance": "FOE",
+      "started": 1795565386,
+      "pred": {
+        "kind": "colo",
+        "conf": 0.91,
+        "units": [
+          "colonize_ship"
+        ],
+        "groups": [
+          {
+            "pct": 91,
+            "units": [
+              "colonize_ship"
+            ]
+          }
+        ],
+        "note": "approximate travel time; Possible colony ship"
+      }
+    }
+  ]
+}

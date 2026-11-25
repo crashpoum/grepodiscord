@@ -81,7 +81,27 @@ CREATE TABLE IF NOT EXISTS gg_keys (key_hash TEXT PRIMARY KEY, guild_id TEXT NOT
 CREATE TABLE IF NOT EXISTS gg_troops (guild_id TEXT NOT NULL, world TEXT NOT NULL, player_id INTEGER NOT NULL, player_name TEXT NOT NULL, user_id TEXT NOT NULL,
   ts INTEGER NOT NULL, recv_at INTEGER NOT NULL, towns_json TEXT NOT NULL, PRIMARY KEY (guild_id, world, player_id));
 CREATE INDEX IF NOT EXISTS gg_troops_user ON gg_troops (guild_id, user_id);
+-- v1.5: data sync feeds (incoming, ops), alerts dedupe, admin panel, better linking, trackers. Additive only.
+CREATE TABLE IF NOT EXISTS sync_feeds (guild_id TEXT NOT NULL, world TEXT NOT NULL, kind TEXT NOT NULL, player_id INTEGER NOT NULL, player_name TEXT NOT NULL, user_id TEXT NOT NULL,
+  ts INTEGER NOT NULL, recv_at INTEGER NOT NULL, items_json TEXT NOT NULL, PRIMARY KEY (guild_id, world, kind, player_id));
+CREATE INDEX IF NOT EXISTS sync_feeds_user ON sync_feeds (guild_id, user_id);
+CREATE TABLE IF NOT EXISTS alert_sent (guild_id TEXT NOT NULL, cmd_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (guild_id, cmd_id));
+CREATE TABLE IF NOT EXISTS bot_admins (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS admin_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, user_id TEXT NOT NULL, user_name TEXT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS admin_audit_g ON admin_audit (guild_id, id);
+CREATE TABLE IF NOT EXISTS access_grants (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, kind TEXT NOT NULL, target_id TEXT NOT NULL, scope TEXT NOT NULL,
+  expires_at INTEGER, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS link_claims (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, user_name TEXT, world TEXT NOT NULL, player_id INTEGER NOT NULL, status TEXT NOT NULL, source TEXT NOT NULL,
+  created_at INTEGER NOT NULL, decided_by TEXT, decided_at INTEGER, PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, text TEXT NOT NULL, post_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'scheduled', error TEXT, message_id TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS guest_links (id TEXT PRIMARY KEY, guild_id TEXT NOT NULL, label TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS player_hours (world TEXT NOT NULL, player_id INTEGER NOT NULL, hour INTEGER NOT NULL, n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (world, player_id, hour));
+CREATE TABLE IF NOT EXISTS seen_members (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id));
 `;
+
+/** Guild-scoped tables in the admin backup. Sync keys and synced data stay out (secrets / short-lived). */
+export const BACKUP_TABLES = ['guild_config', 'guild_settings', 'alliance_roles', 'feeds', 'links', 'war_sides', 'boards', 'threat_subs', 'bot_admins', 'access_grants', 'link_claims', 'announcements', 'guest_links', 'newspapers', 'map_marks'] as const;
 
 export class Store implements FileStore {
   readonly db: DatabaseSync;
@@ -125,7 +145,7 @@ export class Store implements FileStore {
   }
   purgeExpiredMarks(now: number): number { return Number(this.db.prepare('DELETE FROM map_marks WHERE expires_at <= ?').run(now).changes); }
 
-  // ---- GrepoGod troop sync (latest snapshot per player; key is stored hashed)
+  // ---- data sync: troops (latest snapshot per player; key is stored hashed)
   upsertGgKey(k: { keyHash: string; guildId: string; userId: string; playerId: number | null; createdAt: number }): void {
     this.db.prepare('DELETE FROM gg_keys WHERE guild_id = ? AND user_id = ?').run(k.guildId, k.userId);
     this.db.prepare('INSERT INTO gg_keys (key_hash, guild_id, user_id, player_id, created_at) VALUES (?, ?, ?, ?, ?)').run(k.keyHash, k.guildId, k.userId, k.playerId, k.createdAt);
@@ -155,6 +175,162 @@ export class Store implements FileStore {
   }
   deleteGgTroopsForUser(guildId: string, userId: string): number {
     return Number(this.db.prepare('DELETE FROM gg_troops WHERE guild_id = ? AND user_id = ?').run(guildId, userId).changes);
+  }
+
+  // ---- data sync feeds (incoming / ops): latest full list per player
+  putFeed(f: { guildId: string; world: string; kind: string; playerId: number; playerName: string; userId: string; ts: number; recvAt: number; itemsJson: string }): void {
+    this.db.prepare(`INSERT INTO sync_feeds (guild_id, world, kind, player_id, player_name, user_id, ts, recv_at, items_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, world, kind, player_id) DO UPDATE SET player_name=excluded.player_name, user_id=excluded.user_id, ts=excluded.ts, recv_at=excluded.recv_at, items_json=excluded.items_json`)
+      .run(f.guildId, f.world, f.kind, f.playerId, f.playerName, f.userId, f.ts, f.recvAt, f.itemsJson);
+  }
+  listFeeds(guildId: string, world: string, kind: string): { playerId: number; playerName: string; userId: string; ts: number; recvAt: number; itemsJson: string }[] {
+    return (this.db.prepare('SELECT * FROM sync_feeds WHERE guild_id = ? AND world = ? AND kind = ? ORDER BY player_name COLLATE NOCASE').all(guildId, world, kind) as Record<string, unknown>[])
+      .map((r) => ({ playerId: Number(r.player_id), playerName: String(r.player_name), userId: String(r.user_id), ts: Number(r.ts), recvAt: Number(r.recv_at), itemsJson: String(r.items_json) }));
+  }
+  deleteFeedsForUser(guildId: string, userId: string, kind?: string): number {
+    return Number((kind
+      ? this.db.prepare('DELETE FROM sync_feeds WHERE guild_id = ? AND user_id = ? AND kind = ?').run(guildId, userId, kind)
+      : this.db.prepare('DELETE FROM sync_feeds WHERE guild_id = ? AND user_id = ?').run(guildId, userId)).changes);
+  }
+  /** Who shares what, for the admin panel: key holders with their last troop/incoming/ops update. */
+  syncOverview(guildId: string): { userId: string; playerId: number | null; createdAt: number; last: Record<string, number> }[] {
+    const keys = this.db.prepare('SELECT user_id, player_id, created_at FROM gg_keys WHERE guild_id = ?').all(guildId) as Record<string, unknown>[];
+    const t = this.db.prepare('SELECT user_id, MAX(recv_at) AS at FROM gg_troops WHERE guild_id = ? GROUP BY user_id').all(guildId) as Record<string, unknown>[];
+    const f = this.db.prepare('SELECT user_id, kind, MAX(recv_at) AS at FROM sync_feeds WHERE guild_id = ? GROUP BY user_id, kind').all(guildId) as Record<string, unknown>[];
+    const last = new Map<string, Record<string, number>>();
+    for (const r of t) last.set(String(r.user_id), { troops: Number(r.at) });
+    for (const r of f) last.set(String(r.user_id), { ...(last.get(String(r.user_id)) ?? {}), [String(r.kind)]: Number(r.at) });
+    const users = new Set([...keys.map((k) => String(k.user_id)), ...last.keys()]);
+    return [...users].map((u) => { const k = keys.find((x) => String(x.user_id) === u); return { userId: u, playerId: k?.player_id == null ? null : Number(k.player_id), createdAt: k ? Number(k.created_at) : 0, last: last.get(u) ?? {} }; });
+  }
+  /** Mark command ids as alerted; returns the ids that were NOT alerted before (dedupe across restarts). */
+  claimAlerts(guildId: string, ids: string[], at: number): Set<string> {
+    const fresh = new Set<string>();
+    const ins = this.db.prepare('INSERT OR IGNORE INTO alert_sent (guild_id, cmd_id, at) VALUES (?, ?, ?)');
+    for (const id of ids) if (Number(ins.run(guildId, id, at).changes) > 0) fresh.add(id);
+    this.db.prepare('DELETE FROM alert_sent WHERE at < ?').run(at - 14 * 86400_000);
+    return fresh;
+  }
+  alertedIds(guildId: string, ids: string[]): Set<string> {
+    if (!ids.length) return new Set();
+    const q = this.db.prepare('SELECT 1 FROM alert_sent WHERE guild_id = ? AND cmd_id = ?');
+    return new Set(ids.filter((id) => q.get(guildId, id)));
+  }
+
+  // ---- admin panel: admins (owner-managed), audit, access grants, announcements, guest links
+  listAdmins(guildId: string): { userId: string; name: string | null; addedBy: string; addedAt: number }[] {
+    return (this.db.prepare('SELECT * FROM bot_admins WHERE guild_id = ? ORDER BY added_at').all(guildId) as Record<string, unknown>[])
+      .map((r) => ({ userId: String(r.user_id), name: r.name == null ? null : String(r.name), addedBy: String(r.added_by), addedAt: Number(r.added_at) }));
+  }
+  isAdmin(guildId: string, userId: string): boolean { return !!this.db.prepare('SELECT 1 FROM bot_admins WHERE guild_id = ? AND user_id = ?').get(guildId, userId); }
+  addAdmin(guildId: string, userId: string, name: string | null, by: string, at: number) {
+    this.db.prepare('INSERT INTO bot_admins (guild_id, user_id, name, added_by, added_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET name=excluded.name').run(guildId, userId, name, by, at);
+  }
+  removeAdmin(guildId: string, userId: string): boolean { return Number(this.db.prepare('DELETE FROM bot_admins WHERE guild_id = ? AND user_id = ?').run(guildId, userId).changes) > 0; }
+  audit(guildId: string, userId: string, userName: string | null, action: string, detail: string, at: number) {
+    this.db.prepare('INSERT INTO admin_audit (guild_id, user_id, user_name, action, detail, at) VALUES (?, ?, ?, ?, ?, ?)').run(guildId, userId, userName, action, detail.slice(0, 500), at);
+    this.db.prepare('DELETE FROM admin_audit WHERE guild_id = ? AND id <= (SELECT MAX(id) - 2000 FROM admin_audit WHERE guild_id = ?)').run(guildId, guildId);
+  }
+  listAudit(guildId: string, limit = 100): { id: number; userId: string; userName: string | null; action: string; detail: string; at: number }[] {
+    return (this.db.prepare('SELECT * FROM admin_audit WHERE guild_id = ? ORDER BY id DESC LIMIT ?').all(guildId, limit) as Record<string, unknown>[])
+      .map((r) => ({ id: Number(r.id), userId: String(r.user_id), userName: r.user_name == null ? null : String(r.user_name), action: String(r.action), detail: String(r.detail), at: Number(r.at) }));
+  }
+  listGrants(guildId: string): { id: number; kind: 'user' | 'role'; targetId: string; scope: 'troops' | 'alerts' | 'ops'; expiresAt: number | null; createdBy: string; createdAt: number }[] {
+    return (this.db.prepare('SELECT * FROM access_grants WHERE guild_id = ? ORDER BY id').all(guildId) as Record<string, unknown>[])
+      .map((r) => ({ id: Number(r.id), kind: r.kind === 'role' ? 'role' : 'user', targetId: String(r.target_id), scope: (['troops', 'alerts', 'ops'].includes(String(r.scope)) ? r.scope : 'ops') as 'ops', expiresAt: r.expires_at == null ? null : Number(r.expires_at), createdBy: String(r.created_by), createdAt: Number(r.created_at) }));
+  }
+  addGrant(g: { guildId: string; kind: 'user' | 'role'; targetId: string; scope: string; expiresAt: number | null; createdBy: string; createdAt: number }): number {
+    this.db.prepare('DELETE FROM access_grants WHERE guild_id = ? AND kind = ? AND target_id = ? AND scope = ?').run(g.guildId, g.kind, g.targetId, g.scope);
+    return Number(this.db.prepare('INSERT INTO access_grants (guild_id, kind, target_id, scope, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(g.guildId, g.kind, g.targetId, g.scope, g.expiresAt, g.createdBy, g.createdAt).lastInsertRowid);
+  }
+  removeGrant(guildId: string, id: number): boolean { return Number(this.db.prepare('DELETE FROM access_grants WHERE guild_id = ? AND id = ?').run(guildId, id).changes) > 0; }
+  purgeExpiredGrants(now: number): number { return Number(this.db.prepare('DELETE FROM access_grants WHERE expires_at IS NOT NULL AND expires_at <= ?').run(now).changes); }
+
+  addAnnouncement(a: { guildId: string; channelId: string; text: string; postAt: number; createdBy: string; createdAt: number }): number {
+    return Number(this.db.prepare('INSERT INTO announcements (guild_id, channel_id, text, post_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(a.guildId, a.channelId, a.text, a.postAt, a.createdBy, a.createdAt).lastInsertRowid);
+  }
+  private rowToAnn = (r: Record<string, unknown>) => ({ id: Number(r.id), guildId: String(r.guild_id), channelId: String(r.channel_id), text: String(r.text), postAt: Number(r.post_at), status: String(r.status), error: r.error == null ? null : String(r.error), messageId: r.message_id == null ? null : String(r.message_id), createdBy: String(r.created_by), createdAt: Number(r.created_at) });
+  listAnnouncements(guildId: string) { return (this.db.prepare('SELECT * FROM announcements WHERE guild_id = ? ORDER BY id DESC LIMIT 50').all(guildId) as Record<string, unknown>[]).map(this.rowToAnn); }
+  dueAnnouncements(now: number) { return (this.db.prepare("SELECT * FROM announcements WHERE status = 'scheduled' AND post_at <= ? ORDER BY post_at LIMIT 20").all(now) as Record<string, unknown>[]).map(this.rowToAnn); }
+  markAnnouncement(id: number, status: 'sent' | 'failed' | 'cancelled', messageId: string | null, error: string | null) { this.db.prepare('UPDATE announcements SET status = ?, message_id = ?, error = ? WHERE id = ?').run(status, messageId, error, id); }
+  cancelAnnouncement(guildId: string, id: number): boolean { return Number(this.db.prepare("UPDATE announcements SET status = 'cancelled' WHERE guild_id = ? AND id = ? AND status = 'scheduled'").run(guildId, id).changes) > 0; }
+
+  addGuestLink(g: { id: string; guildId: string; label: string; createdBy: string; createdAt: number; expiresAt: number }) {
+    this.db.prepare('INSERT INTO guest_links (id, guild_id, label, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)').run(g.id, g.guildId, g.label, g.createdBy, g.createdAt, g.expiresAt);
+  }
+  listGuestLinks(guildId: string) {
+    return (this.db.prepare('SELECT * FROM guest_links WHERE guild_id = ? ORDER BY created_at DESC LIMIT 50').all(guildId) as Record<string, unknown>[])
+      .map((r) => ({ id: String(r.id), label: String(r.label), createdBy: String(r.created_by), createdAt: Number(r.created_at), expiresAt: Number(r.expires_at), revoked: Number(r.revoked) === 1 }));
+  }
+  guestLinkOk(guildId: string, id: string, now: number): boolean {
+    const r = this.db.prepare('SELECT expires_at, revoked FROM guest_links WHERE guild_id = ? AND id = ?').get(guildId, id) as Record<string, unknown> | undefined;
+    return !!r && Number(r.revoked) === 0 && Number(r.expires_at) > now;
+  }
+  revokeGuestLink(guildId: string, id: string): boolean { return Number(this.db.prepare('UPDATE guest_links SET revoked = 1 WHERE guild_id = ? AND id = ?').run(guildId, id).changes) > 0; }
+
+  // ---- linking: /iam claims (pending until an admin approves), seen member names (for nickname suggestions)
+  private rowToClaim = (r: Record<string, unknown>) => ({ guildId: String(r.guild_id), userId: String(r.user_id), userName: r.user_name == null ? null : String(r.user_name), world: String(r.world), playerId: Number(r.player_id),
+    status: String(r.status) as 'pending' | 'approved' | 'rejected', source: String(r.source), createdAt: Number(r.created_at), decidedBy: r.decided_by == null ? null : String(r.decided_by), decidedAt: r.decided_at == null ? null : Number(r.decided_at) });
+  getClaim(guildId: string, userId: string) { const r = this.db.prepare('SELECT * FROM link_claims WHERE guild_id = ? AND user_id = ?').get(guildId, userId) as Record<string, unknown> | undefined; return r ? this.rowToClaim(r) : null; }
+  claimForPlayer(guildId: string, world: string, playerId: number) { const r = this.db.prepare("SELECT * FROM link_claims WHERE guild_id = ? AND world = ? AND player_id = ? AND status = 'pending'").get(guildId, world, playerId) as Record<string, unknown> | undefined; return r ? this.rowToClaim(r) : null; }
+  listClaims(guildId: string, status = 'pending') { return (this.db.prepare('SELECT * FROM link_claims WHERE guild_id = ? AND status = ? ORDER BY created_at').all(guildId, status) as Record<string, unknown>[]).map(this.rowToClaim); }
+  setClaim(c: { guildId: string; userId: string; userName: string | null; world: string; playerId: number; status: string; source: string; createdAt: number; decidedBy?: string | null; decidedAt?: number | null }) {
+    this.db.prepare(`INSERT INTO link_claims (guild_id, user_id, user_name, world, player_id, status, source, created_at, decided_by, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET user_name=excluded.user_name, world=excluded.world, player_id=excluded.player_id, status=excluded.status, source=excluded.source, created_at=excluded.created_at, decided_by=excluded.decided_by, decided_at=excluded.decided_at`)
+      .run(c.guildId, c.userId, c.userName, c.world, c.playerId, c.status, c.source, c.createdAt, c.decidedBy ?? null, c.decidedAt ?? null);
+  }
+  decideClaim(guildId: string, userId: string, status: 'approved' | 'rejected', by: string, at: number): boolean {
+    return Number(this.db.prepare("UPDATE link_claims SET status = ?, decided_by = ?, decided_at = ? WHERE guild_id = ? AND user_id = ? AND status = 'pending'").run(status, by, at, guildId, userId).changes) > 0;
+  }
+  removeClaim(guildId: string, userId: string) { this.db.prepare('DELETE FROM link_claims WHERE guild_id = ? AND user_id = ?').run(guildId, userId); }
+  seeMember(guildId: string, userId: string, name: string, at: number) {
+    this.db.prepare('INSERT INTO seen_members (guild_id, user_id, name, at) VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET name=excluded.name, at=excluded.at').run(guildId, userId, name.slice(0, 64), at);
+  }
+  seenMembers(guildId: string): { userId: string; name: string; at: number }[] {
+    return (this.db.prepare('SELECT * FROM seen_members WHERE guild_id = ? ORDER BY at DESC LIMIT 1000').all(guildId) as Record<string, unknown>[]).map((r) => ({ userId: String(r.user_id), name: String(r.name), at: Number(r.at) }));
+  }
+
+  // ---- player activity clock: hours (world time zone of the box, UTC stored) when a player's score changed
+  bumpPlayerHours(world: string, playerIds: number[], hourUtc: number) {
+    if (!playerIds.length) return;
+    const st = this.db.prepare('INSERT INTO player_hours (world, player_id, hour, n) VALUES (?, ?, ?, 1) ON CONFLICT(world, player_id, hour) DO UPDATE SET n = n + 1');
+    this.db.exec('BEGIN');
+    try { for (const id of playerIds) st.run(world, id, hourUtc); this.db.exec('COMMIT'); } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  playerHours(world: string, playerId: number): number[] {
+    const h = new Array<number>(24).fill(0);
+    for (const r of this.db.prepare('SELECT hour, n FROM player_hours WHERE world = ? AND player_id = ?').all(world, playerId) as { hour: number; n: number }[]) h[Number(r.hour)] = Number(r.n);
+    return h;
+  }
+
+  /** Raw rows of the guild-scoped tables, for the admin backup (sync keys are never exported). */
+  exportGuild(guildId: string): Record<string, Record<string, unknown>[]> {
+    const out: Record<string, Record<string, unknown>[]> = {};
+    for (const t of BACKUP_TABLES) out[t] = this.db.prepare(`SELECT * FROM ${t} WHERE guild_id = ?`).all(guildId) as Record<string, unknown>[];
+    return out;
+  }
+  /** Replace the guild's rows of the backup tables (one transaction). Columns are checked against the live schema. */
+  importGuild(guildId: string, data: Record<string, unknown>): number {
+    let n = 0;
+    this.db.exec('BEGIN');
+    try {
+      for (const t of BACKUP_TABLES) {
+        const rows = data[t];
+        if (!Array.isArray(rows)) continue;
+        const cols = (this.db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+        this.db.prepare(`DELETE FROM ${t} WHERE guild_id = ?`).run(guildId);
+        for (const row of rows.slice(0, 20_000)) {
+          if (!row || typeof row !== 'object') continue;
+          const r: Record<string, unknown> = { ...(row as Record<string, unknown>), guild_id: guildId };
+          const ks = Object.keys(r).filter((k) => cols.includes(k) && (r[k] === null || ['string', 'number'].includes(typeof r[k])));
+          this.db.prepare(`INSERT OR REPLACE INTO ${t} (${ks.join(', ')}) VALUES (${ks.map(() => '?').join(', ')})`).run(...ks.map((k) => r[k] as string | number | null));
+          n++;
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    return n;
   }
 
   // ---- guild config

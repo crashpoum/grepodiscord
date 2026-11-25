@@ -2,7 +2,7 @@
  * Web app server (node:http, no framework): the Discord Activity and the browser dashboard are the same pages.
  *
  *   GET  /, /live, /map, /troops  single-page app (bundle in compiled/public)
- *   POST/DELETE /api/gg/troops  GrepoGod troop sync (Bearer key, CORS for *.grepolis.com)
+ *   POST/DELETE /api/gg/{troops,incoming,ops}  data sync from an external client (Bearer key, CORS for *.grepolis.com; /api/sync/* alias)
  *   POST /api/token         Activity OAuth: code -> access_token (+ our session), membership checked
  *   GET  /login, /oauth/*   browser dashboard Discord login (same Activity app credentials)
  *   GET  /api/me|live|map   data, `Authorization: Bearer <session>` (session from /api/token, OAuth or a signed /live link)
@@ -34,6 +34,11 @@ import { LiveHub } from './live.js';
 import { buildMapPayload } from './mapData.js';
 import { authorizeUrl, bearer, check, discordGet, exchangeCode, issueSession, keyId, OAuthError, readCookie, sessionCookie, sign, verify, webSecret, type DiscordGuild, type DiscordUser, type WebSession } from './auth.js';
 import { termsPage, privacyPage, messagePage, pickerPage } from './pages.js';
+import { AdminService } from '../admin/service.js';
+import { linkState } from '../admin/linking.js';
+import type { Viewer } from '../admin/settings.js';
+import { dispatchIncomingAlerts } from '../bot/alerts.js';
+import { townPanel } from './townPanel.js';
 
 export type Presence = 'yes' | 'no' | 'unknown';
 /**
@@ -50,7 +55,11 @@ export interface BotGuilds {
   manager?(guildId: string, userId: string): Promise<boolean>;
   diag?(): string;
 }
-export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; gpcdn?: GpCdn; marks?: MarksService; gg?: GgService; now?: () => number }
+export interface WebDeps { ctx: Ctx; guilds: BotGuilds; secret: string; staticDir?: string | null; fetchImpl?: typeof fetch; hub?: LiveHub; islands?: IslandCache; gpcdn?: GpCdn; marks?: MarksService; gg?: GgService; admin?: AdminService; now?: () => number }
+/** Tabs of the single-page app (also the /go/<tab> personal-link targets). */
+export const APP_TABS = ['live', 'map', 'troops', 'alerts', 'ops', 'admin', 'mini'] as const;
+export type AppTab = (typeof APP_TABS)[number];
+const isTab = (t: string): t is AppTab => (APP_TABS as readonly string[]).includes(t);
 
 type AuthFail = 'none' | 'bad' | 'expired' | 'guild';
 const AUTH_KEY = { none: 'web.err.login', bad: 'web.err.badLink', expired: 'web.err.auth', guild: 'web.err.botGone' } as const;
@@ -125,11 +134,13 @@ export function createWebApp(deps: WebDeps) {
   // eslint-disable-next-line prefer-const
   let hub: LiveHub;
   /** Own + allies + enemies for the map and the live in/out split (see mapSides for the fallbacks). */
+  const admin = deps.admin ?? new AdminService(ctx, secret, now);
   const sidesOf = (g: string, snap: Awaited<ReturnType<typeof ctx.worlds.ensure>>) => {
     const explicit = ctx.store.getWarSides(g, snap.world);
+    const own = admin.settings(g).ownAlliances;
     const live = hub?.liveSides(g) ?? { own: [], attackers: [] };
     return mapSides(snap, {
-      explicitOurs: explicit.ours, explicitEnemies: explicit.enemies, now: Math.floor(now() / 1000),
+      explicitOurs: explicit.ours, explicitEnemies: explicit.enemies, explicitOwn: own, now: Math.floor(now() / 1000),
       linkedPlayers: ctx.store.linksForGuild(g).filter((l) => l.world === snap.world).map((l) => l.playerId),
       roleAlliances: [...ctx.store.getAllianceRoles(g).keys()], liveOwn: live.own, liveAttackers: live.attackers,
     });
@@ -139,6 +150,18 @@ export function createWebApp(deps: WebDeps) {
   const gpcdn = deps.gpcdn ?? new GpCdn(fetchImpl, now);
   const marks = deps.marks ?? new MarksService(ctx.store, (g, u) => guilds.manager?.(g, u) ?? Promise.resolve(false), now);
   const gg = deps.gg ?? new GgService(ctx.store, now);
+  hub.guildOpts = (g) => admin.settings(g).live;
+  admin.hub = hub; admin.marks = marks; admin.gg = gg;
+  // Admin settings: optionally require a linked player before sync data is accepted; new incoming attacks → alerts channel.
+  gg.hooks = {
+    requireLink: (g, u) => {
+      const st = admin.settings(g);
+      if (!st.sync.requireLink) return false;
+      const ls = linkState(ctx.store, g, u, ctx.store.getGuild(g).world);
+      return !(ls === 'confirmed' || (ls === 'pending' && st.linking.unconfirmed === 'full'));
+    },
+    onIncoming: gg.hooks.onIncoming ?? ((e) => { void dispatchIncomingAlerts(ctx, admin, e, now).catch((err: unknown) => log.warn(`alerts ${e.guildId}: ${err}`)); }),
+  };
   const staticDir = deps.staticDir === undefined ? findStaticDir() : deps.staticDir;
   const limiter = new IpLimiter(20, now);
   const mapCache = new Map<string, { key: unknown; at: number; body: Buffer; gz: Buffer; etag: string; sides: string }>();
@@ -179,12 +202,14 @@ export function createWebApp(deps: WebDeps) {
       if (r.why !== 'none') log.warn(`web: ${b ? 'bearer' : 'cookie'} session refused (${r.why}${r.exp ? `, expired ${new Date(r.exp).toISOString()}` : ''}); this process signs with key ${keyId(secret)}`);
       return { why: r.why };
     }
+    // Guest links can be revoked (or expire) server-side before their token does.
+    if (r.v.k === 'guest' && (!r.v.j || !ctx.store.guestLinkOk(r.v.g, r.v.j, now()))) return { why: 'expired' as AuthFail };
     return { s: r.v };
   }
   const secureCookie = (req: http.IncomingMessage) => config.publicUrl.startsWith('https://') || String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https';
   /** Store the session in a cookie and send the browser to the clean page URL (no token left in the address bar). */
   const login = (req: http.IncomingMessage, res: Res, token: string, exp: number, tab: string) => {
-    res.writeHead(302, { Location: `/${tab === 'map' || tab === 'troops' ? tab : 'live'}`, 'Set-Cookie': sessionCookie(token, (exp - now()) / 1000, secureCookie(req)), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+    res.writeHead(302, { Location: `/${isTab(tab) ? tab : 'live'}`, 'Set-Cookie': sessionCookie(token, (exp - now()) / 1000, secureCookie(req)), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
     res.end();
   };
 
@@ -243,7 +268,7 @@ export function createWebApp(deps: WebDeps) {
     const ip = String(req.headers['cf-connecting-ip'] ?? req.socket.remoteAddress ?? '?');
     const lang0 = config.defaultLang;
 
-    if (req.method === 'GET' && (p === '/' || p === '/live' || p === '/map' || p === '/troops')) {
+    if (req.method === 'GET' && (p === '/' || isTab(p.slice(1)))) {
       const page = indexHtml();
       if (!page) return html(res, 503, messagePage(lang0, 'Web bundle missing: run `npm run build`.'));
       return html(res, 200, page);
@@ -297,7 +322,8 @@ export function createWebApp(deps: WebDeps) {
     // ---- Browser dashboard login
     if (req.method === 'GET' && p === '/login') {
       if (!loginOk()) return html(res, 503, page(lang0, t(lang0, 'web.err.noOAuth')));
-      const next = url.searchParams.get('next') === 'map' ? 'map' : 'live';
+      const nx = url.searchParams.get('next') ?? '';
+      const next = isTab(nx) ? nx : 'live';
       const state = sign({ n: next, r: randomBytes(8).toString('hex'), exp: now() + 10 * 60_000 }, secret);
       log.info(`web: Discord login started (client ${config.activityClientId}, redirect_uri ${redirectUri()})`);
       return redirect(res, authorizeUrl(state, redirectUri()));
@@ -335,7 +361,7 @@ export function createWebApp(deps: WebDeps) {
     }
 
     // ---- Personal link from /live or /map: token in the query -> session cookie -> clean URL
-    const go = /^\/go\/(live|map|troops)$/.exec(p);
+    const go = /^\/go\/(live|map|troops|alerts|ops|admin|mini|guest)$/.exec(p);
     if (req.method === 'GET' && go) {
       const r = check<WebSession>(url.searchParams.get('t'), secret, now());
       if (!r.ok) {
@@ -345,6 +371,10 @@ export function createWebApp(deps: WebDeps) {
       // Trust the signature (the bot signed it for this guild + user at command time); only refuse when Discord
       // positively says the bot left the server or the user is no longer a member.
       const gl = langOf(r.v.g);
+      if (r.v.k === 'guest') {
+        if (!r.v.j || !ctx.store.guestLinkOk(r.v.g, r.v.j, now())) return html(res, 401, linkPage(gl, t(gl, 'web.err.guestGone')));
+        return login(req, res, url.searchParams.get('t')!, r.v.exp, 'live');
+      }
       await botIn(r.v.g);
       const m = guilds.member ? await guilds.member(r.v.g, r.v.u).catch(() => 'unknown' as Presence) : 'unknown';
       if (m === 'no') { log.warn(`web: link for user ${r.v.u} refused: no longer a member of ${r.v.g}`); return html(res, 403, linkPage(gl, t(gl, 'web.err.left'))); }
@@ -355,8 +385,10 @@ export function createWebApp(deps: WebDeps) {
       return void res.end();
     }
 
-    // ---- GrepoGod troop sync (Bearer key, not a Discord session). CORS for grepolis.com origins only.
-    if (p === '/api/gg/troops' && req.method !== 'GET') {
+    // ---- data sync (Bearer key, not a Discord session). CORS for grepolis.com origins only. /api/sync/* = same endpoints.
+    const sy = /^\/api\/(?:gg|sync)\/(troops|incoming|ops)$/.exec(p);
+    if (sy && req.method !== 'GET') {
+      const kind = sy[1] as 'troops' | 'incoming' | 'ops';
       const cors = ggCorsHeaders(typeof req.headers.origin === 'string' ? req.headers.origin : undefined);
       if (req.method === 'OPTIONS') { res.writeHead(cors.allow ? 204 : 403, cors.headers); return void res.end(); }
       if (!cors.allow) return ggSend(res, 403, { error: 'origin' }, cors.headers);
@@ -364,11 +396,12 @@ export function createWebApp(deps: WebDeps) {
       if (req.method === 'POST') {
         const raw = await readGgBody(req);
         if (!raw.ok) return ggSend(res, raw.status, { error: raw.status === 413 ? 'tooLarge' : 'invalid' }, cors.headers);
-        const r = gg.post(key, raw.body);
-        return ggSend(res, r.status, r.body, cors.headers);
+        const r = kind === 'troops' ? gg.post(key, raw.body) : gg.postFeed(kind, key, raw.body);
+        const retry: Record<string, string> = r.status === 429 && typeof r.body.retry_after === 'number' ? { 'Retry-After': String(r.body.retry_after) } : {};
+        return ggSend(res, r.status, r.body, { ...cors.headers, ...retry, ...(cors.headers['Access-Control-Allow-Origin'] ? { 'Access-Control-Expose-Headers': 'Retry-After' } : {}) });
       }
       if (req.method === 'DELETE') {
-        const r = gg.remove(key);
+        const r = gg.remove(key, kind);
         return ggSend(res, r.status, r.body, cors.headers);
       }
       return ggSend(res, 405, { error: 'method' }, cors.headers);
@@ -377,20 +410,55 @@ export function createWebApp(deps: WebDeps) {
     // ---- Data API
     if (p.startsWith('/api/')) {
       const isMarksWrite = req.method === 'POST' && /^\/api\/marks(?:\/delete|\/clear)?$/.test(p);
-      if (req.method !== 'GET' && !isMarksWrite) return json(res, 405, { error: 'method' });
+      const isWrite = isMarksWrite || (req.method === 'POST' && (p === '/api/live/refresh' || p === '/api/admin/action'));
+      if (req.method !== 'GET' && !isWrite) return json(res, 405, { error: 'method' });
       // Writes need a custom header: a cross-site form/page can't send it without a CORS preflight we never grant (CSRF).
-      if (isMarksWrite && req.headers['x-gc'] !== '1') return json(res, 403, { error: 'missing header' });
+      if (isWrite && req.headers['x-gc'] !== '1') return json(res, 403, { error: 'missing header' });
       const sr = await session(req);
       if (!('s' in sr)) return json(res, 401, { error: t(lang0, sr.why === 'none' && !loginOk() ? 'web.freshLink' : AUTH_KEY[sr.why]), reason: sr.why });
       const s = sr.s;
       const lang = langOf(s.g);
+      // Guest links: read-only live + map, nothing else.
+      if (s.k === 'guest' && !(req.method === 'GET' && ['/api/me', '/api/live', '/api/map', '/api/islands', '/api/marks'].includes(p))) return json(res, 403, { error: t(lang, 'web.err.guest') });
+      let viewerP: Promise<Viewer> | null = null;
+      const viewer = () => (viewerP ??= admin.viewer(s));
+      const deny = () => json(res, 403, { error: t(lang, 'web.err.noAccess') });
       if (p === '/api/me') {
         const gc = ctx.store.getGuild(s.g, config.defaultLang);
         const link = ctx.store.getLink(s.g, s.u);
+        const st = admin.settings(s.g);
         return json(res, 200, { user: s.n ?? null, guildId: s.g, guild: guilds.name(s.g), world: gc.world, lang: gc.lang, me: link && link.world === gc.world ? link.playerId : null, exp: s.exp,
+          tabs: await admin.tabs(s), colors: st.colors, planner: st.planner,
           units: gc.world ? Object.fromEntries(Object.keys(UNIT_EN).map((u) => [u, unitName(u, gc.lang, gc.world!)])) : {}, error: gc.world ? null : t(lang, 'web.err.notSetup') });
       }
       if (p === '/api/live') return json(res, 200, await hub.view(s.g, lang), req);
+      if (p === '/api/live/refresh') {
+        const r = hub.refreshNow(s.g);
+        return r.ok ? json(res, 202, { ok: true }) : json(res, 429, { error: t(lang, 'web.refreshWait', { s: Math.ceil(r.waitMs / 1000) }), waitMs: r.waitMs });
+      }
+      if (p === '/api/town') {
+        const world = ctx.store.getGuild(s.g).world;
+        if (!world) return json(res, 409, { error: t(lang, 'web.err.notSetup') });
+        const v = await viewer();
+        const id = Number(url.searchParams.get('id'));
+        const body = await townPanel(ctx, gg, s.g, world, s.u, id, { troops: admin.can('troops', v, s.g), alerts: admin.can('alerts', v, s.g) });
+        return body ? json(res, 200, body, req) : json(res, 404, { error: 'not found' });
+      }
+      if (p === '/api/admin/state' || p === '/api/admin/action' || p === '/api/admin/backup') {
+        const v = await viewer();
+        if (!v.admin) return deny();
+        if (p === '/api/admin/state') return json(res, 200, await admin.state(s.g, v), req);
+        if (p === '/api/admin/backup') {
+          if (!v.owner && !v.admin) return deny();
+          ctx.store.audit(s.g, s.u, s.n ?? null, 'backup.download', '', now());
+          const raw = Buffer.from(JSON.stringify(admin.backup(s.g)));
+          return send(res, 200, raw, 'application/json; charset=utf-8', { 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="grepocord-backup-${s.g}.json"` });
+        }
+        let body: Record<string, unknown>;
+        try { body = (await readBody(req, 4 * 1024 * 1024)) as Record<string, unknown>; } catch { return json(res, 413, { error: 'too large' }); }
+        const r = await admin.run(s.g, v, s.n ?? null, String(body.action ?? ''), body);
+        return json(res, r.status, r.body);
+      }
       if (p === '/api/map') return mapPayload(s, req, res);
       if (p === '/api/marks' || p.startsWith('/api/marks/')) {
         const world = ctx.store.getGuild(s.g, config.defaultLang).world;
@@ -400,18 +468,25 @@ export function createWebApp(deps: WebDeps) {
           const since = url.searchParams.has('rev') ? Number(url.searchParams.get('rev')) : undefined;
           const v = await marks.view(s.g, world, s.u, since);
           if (!v) { res.writeHead(204, { 'Cache-Control': 'no-store' }); return void res.end(); }
-          return json(res, 200, v);
+          const vw = await viewer();
+          const dh = admin.settings(s.g).drawing.defaultHours;
+          return json(res, 200, { ...v, canClearAll: v.canClearAll || vw.admin, canDraw: admin.canDraw(vw, s.g), defaultTtl: dh === 1 ? '1h' : dh === 6 ? '6h' : dh === 168 ? '7d' : '24h' });
         }
+        if (!admin.canDraw(await viewer(), s.g)) return json(res, 403, { error: t(lang, 'web.marks.denied') });
         let body: Record<string, unknown>;
         try { body = (await readBody(req, 32_768)) as Record<string, unknown>; } catch { return json(res, 413, { error: t(lang, 'web.marks.invalid') }); }
         if (p === '/api/marks') return out(marks.create(s.g, world, s.u, s.n ?? '', body));
         if (p === '/api/marks/delete') return out(await marks.remove(s.g, world, s.u, body.id));
         if (p === '/api/marks/clear') return out(await marks.clear(s.g, world, s.u, body.all === true));
       }
-      if (p === '/api/gg/troops' && req.method === 'GET') {
+      const sv = /^\/api\/(?:gg|sync)\/(troops|incoming|ops)$/.exec(p);
+      if (sv && req.method === 'GET') {
         const world = ctx.store.getGuild(s.g, config.defaultLang).world;
         if (!world) return json(res, 409, { error: t(lang, 'web.err.notSetup') });
-        return json(res, 200, gg.view(s.g, world, s.u), req);
+        const tab = sv[1] === 'troops' ? 'troops' : sv[1] === 'incoming' ? 'alerts' : 'ops';
+        if (!admin.can(tab, await viewer(), s.g)) return deny();
+        if (sv[1] === 'troops') return json(res, 200, gg.view(s.g, world, s.u), req);
+        return json(res, 200, { ...gg.feedView(sv[1] as 'incoming' | 'ops', s.g, world, s.u), planner: admin.settings(s.g).planner }, req);
       }
       if (p === '/api/islands') return islandsPayload(s, req, res);
       return json(res, 404, { error: 'not found' });
@@ -427,7 +502,7 @@ export function createWebApp(deps: WebDeps) {
       else res.end();
     });
   };
-  return { handler, hub, marks };
+  return { handler, hub, marks, admin, gg };
 }
 
 export function startWebServer(ctx: Ctx, guilds: BotGuilds) {
@@ -443,14 +518,14 @@ export function startWebServer(ctx: Ctx, guilds: BotGuilds) {
     log.info(`web: live window on :${config.webPort}${config.publicUrl ? ` (public ${config.publicUrl})` : ''}; Activity app ${config.activityClientId ? 'configured' : 'not configured'}${findStaticDir() ? '' : ' — WARNING: web bundle missing'}`);
   });
   server.on('error', (e) => log.error('web server error', e));
-  return { secret, close: () => { stopWatch(); app.hub.stop(); app.marks.stop(); server.close(); } };
+  return { secret, hub: app.hub, admin: app.admin, gg: app.gg, marks: app.marks, close: () => { stopWatch(); app.hub.stop(); app.marks.stop(); server.close(); } };
 }
 
 /**
  * Signed personal dashboard link for /live and /map. The token is in the QUERY of /go/<tab>: the server swaps it for an
  * HttpOnly cookie and redirects to the clean URL. (A #fragment is not reliably kept by Discord's link buttons.)
  */
-export function dashboardLink(secret: string, guildId: string, userId: string, name: string, tab: 'live' | 'map' | 'troops', hours: number, at = Date.now()): string | null {
+export function dashboardLink(secret: string, guildId: string, userId: string, name: string, tab: AppTab, hours: number, at = Date.now()): string | null {
   if (!config.publicUrl) return null;
   return `${config.publicUrl}/go/${tab}?t=${issueSession(secret, { u: userId, g: guildId, n: name, k: 'link' }, hours, at)}`;
 }

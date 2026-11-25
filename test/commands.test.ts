@@ -72,3 +72,22 @@ describe('slash commands: Greek localization', () => {
     for (const v of Object.values(STRINGS.el)) for (const r of refs(v)) expect(el.has(r), r).toBe(true);
   });
 });
+
+describe('new commands of this batch', () => {
+  const all = commandJson() as unknown as Node[];
+  it('/iam, /activity, /admin, /sync exist with their Greek names; the old client-specific name is gone', () => {
+    const el = Object.fromEntries(all.map((c) => [c.name, c.name_localizations?.el]));
+    expect(el.iam).toBe('είμαι');
+    expect(el.activity).toBe('δραστηριότητα');
+    expect(el.admin).toBe('διαχείριση');
+    expect(el.sync).toBe('συγχρονισμός');
+    expect(all.some((c) => /god/i.test(c.name))).toBe(false);
+    const iam = all.find((c) => c.name === 'iam')!;
+    expect(iam.options?.[0]).toMatchObject({ name: 'player', name_localizations: { el: 'παίκτης' } });
+    expect((iam.options?.[0] as { autocomplete?: boolean }).autocomplete).toBe(true);
+  });
+  it('the help text points to /iam (EN) and /είμαι (GR)', () => {
+    expect(Object.values(STRINGS.en).join('\n')).toContain('`/iam');
+    expect(Object.values(STRINGS.el).join('\n')).toContain('`/είμαι');
+  });
+});

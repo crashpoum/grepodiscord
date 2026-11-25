@@ -30,12 +30,15 @@ const DAY = 86400;
  * (narrowed to the alliance uploading its own commands, if any), else the alliance uploading its own commands. Allies = /war ally entries that are not own.
  * Enemies = /war enemy, else the alliances taking our towns (30 days), else the senders of incoming attacks.
  */
-export function mapSides(snap: WorldSnapshot, input: { explicitOurs: number[]; explicitEnemies: number[]; linkedPlayers: number[]; roleAlliances: number[]; liveOwn: number[]; liveAttackers: number[]; now: number }): MapSides {
+export function mapSides(snap: WorldSnapshot, input: { explicitOurs: number[]; explicitEnemies: number[]; explicitOwn?: number[]; linkedPlayers: number[]; roleAlliances: number[]; liveOwn: number[]; liveAttackers: number[]; now: number }): MapSides {
   const ok = (ids: Iterable<number>) => [...new Set([...ids].map(Number))].filter((id) => id > 0 && snap.alliances.has(id));
   const set = ok(input.explicitOurs);
   let ours: number[] = []; let source: MapSides['source'] = 'none';
+  const fixed = ok(input.explicitOwn ?? []);
   const linked = ok(input.linkedPlayers.map((p) => snap.players.get(Number(p))?.allianceId ?? 0));
-  if (linked.length) { ours = linked; source = 'verified'; }
+  // Admin panel "our alliance(s)" wins over every guess.
+  if (fixed.length) { ours = fixed; source = 'set'; }
+  else if (linked.length) { ours = linked; source = 'verified'; }
   else if (ok(input.roleAlliances).length) { ours = ok(input.roleAlliances); source = 'roles'; }
   else if (set.length) {
     // /war ally mixes our alliance and its pacts: the one(s) uploading own commands to the share are "us", the rest allies.

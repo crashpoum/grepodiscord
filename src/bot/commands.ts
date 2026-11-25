@@ -265,10 +265,18 @@ export const commands = [
   new SlashCommandBuilder().setName('map').setDescription('Interactive world map with a conquest timeline (Activity or browser)').setDMPermission(false)
     .addBooleanOption((o) => o.setName('share').setDescription('Post the Activity link in this channel so others can join')),
 
-  // ---- GrepoGod troop sync (userscript pushes a snapshot; this server never talks to the game)
-  new SlashCommandBuilder().setName('grepogod').setDescription('Link GrepoGod so this server can see your troops').setDMPermission(false)
-    .addSubcommand((s) => s.setName('link').setDescription('Get a private key for GrepoGod (or replace your existing key)'))
-    .addSubcommand((s) => s.setName('unlink').setDescription('Delete your key and troop data from this server')),
+  // ---- Data sync key (an external client pushes data the game already shows the player; this server never talks to the game)
+  new SlashCommandBuilder().setName('sync').setDescription('Key so an external client can push your data to this server').setDMPermission(false)
+    .addSubcommand((s) => s.setName('link').setDescription('Get a private sync key (or replace your existing key)'))
+    .addSubcommand((s) => s.setName('unlink').setDescription('Delete your key and all synced data from this server')),
+
+  // ---- Better linking: pick your player, an admin confirms with one click (/verify stays as a fallback)
+  new SlashCommandBuilder().setName('iam').setDescription('Link your Discord to your in-game player (an admin confirms)').setDMPermission(false)
+    .addStringOption((o) => o.setName('player').setDescription('Your in-game player name').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder().setName('activity').setDescription('When a player is usually active (24-hour clock)')
+    .addStringOption((o) => o.setName('player').setDescription('Player').setRequired(true).setAutocomplete(true))
+    .addStringOption(worldOpt),
+  new SlashCommandBuilder().setName('admin').setDescription('Open the admin panel (bot admins)').setDMPermission(false),
 ];
 
 /** Message actions (right-click a message → Apps). Names may contain spaces; localized in commandJson. */

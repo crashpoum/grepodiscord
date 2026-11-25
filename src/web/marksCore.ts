@@ -15,7 +15,8 @@ export const MARK_LIMITS = { points: 400, perGuild: 300, perUser: 80, text: 140,
 export interface MarkInput { kind: MarkKind; color: string; width: number; pts: number[]; text?: string; ttl: MarkTtl }
 /** A stored shape as served to clients. `mine` = drawn by the viewer; userId is never sent. */
 export interface Mark { id: number; kind: MarkKind; color: string; width: number; pts: number[]; text: string; author: string; mine: boolean; createdAt: number; expiresAt: number }
-export interface MarksView { rev: number; marks: Mark[]; canClearAll: boolean; limits: typeof MARK_LIMITS }
+/** `canDraw` / `defaultTtl` come from the admin panel (who may draw, default expiry). */
+export interface MarksView { rev: number; marks: Mark[]; canClearAll: boolean; limits: typeof MARK_LIMITS; canDraw?: boolean; defaultTtl?: MarkTtl }
 
 /** Plain text only: no tags, no control characters, collapsed whitespace, capped length. Rendered with fillText/textContent anyway. */
 export function sanitizeText(s: unknown, max: number = MARK_LIMITS.text): string {

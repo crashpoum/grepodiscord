@@ -18,9 +18,9 @@ const body = (over: Record<string, unknown> = {}) => ({
   v: 1, world: 'gr125', player_id: 1001, player_name: 'Leonidas', ts: Date.now(), towns: [town(1)], ...over,
 });
 
-describe('GrepoGod payload validation', () => {
+describe('troop sync payload validation', () => {
   const okW = (w: string) => w === 'gr125';
-  it('accepts a frSnapshot-shaped town and strips extras', () => {
+  it('accepts a client town snapshot and strips extras', () => {
     const r = validatePayload(body({ towns: [town(7, { it: { sword: 10, hoplite: 4 }, w: 25, wq: 26, wa: 1_764_103_600, sup: { hoplite: 4 } })], extra: true }), Date.now(), okW);
     expect(r.ok).toBe(true);
     if (r.ok) {
@@ -78,7 +78,7 @@ describe('GrepoGod payload validation', () => {
     expect(cleanRes({ wood: 1, stone: 2, iron: 3, storage: 10 })).toEqual({ wood: 1, stone: 2, iron: 3, storage: 10 });
     expect(cleanSpells([{ id: 'happiness', name: '<b>X</b>' }])).toEqual([{ id: 'happiness', name: 'bX/b' }]);
   });
-  it('spell labels never become [object Object] and fmtK / countdown helpers match GrepoGod', () => {
+  it('spell labels never become [object Object] and fmtK / countdown helpers', () => {
     expect(spellLabel('happiness', undefined, 'en')).toBe('Happiness');
     expect(spellLabel('happiness', undefined, 'el')).toBe('Ευτυχία');
     expect(spellLabel('unknown_power', 'Custom Aura', 'en')).toBe('Custom Aura');
@@ -111,7 +111,7 @@ describe('GrepoGod payload validation', () => {
   });
 });
 
-describe('GrepoGod keys and service', () => {
+describe('sync keys and service', () => {
   const setup = (world = 'gr125') => {
     let t = Date.now();
     const store = new Store(':memory:');
@@ -183,7 +183,7 @@ describe('CORS origins', () => {
   });
 });
 
-describe('GrepoGod HTTP API', () => {
+describe('sync HTTP API', () => {
   it('POST/DELETE with Bearer key; CORS; 401/413/429; GET needs a guild session', async () => {
     const store = new Store(':memory:');
     store.setGuild({ guildId: 'g1', world: 'gr125', lang: 'en', verifiedRoleId: null });

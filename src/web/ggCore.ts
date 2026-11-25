@@ -1,8 +1,8 @@
 /**
- * GrepoGod → GrepoCord troop snapshots: shared types and strict validation (server + tests).
- * The payload's `towns` array is the town objects from GrepoGod `frSnapshot()` (cleanUnits / frWall / frSupportIn):
+ * Data sync → GrepoCord troop snapshots: shared types and strict validation (server + tests).
+ * The payload's `towns` array holds one object per town (see docs/CLIENT-SYNC-API.md):
  *   { id, n, sea, home, total, sup?, w?, wq?, wa?, it?, res?, spells? }
- * Optional per-town `res` / `spells` come from already-loaded models (GrepoGod shRes / shSp).
+ * Optional per-town `res` / `spells` are sent only when the client's matching share switch is on.
  * Extra snapshot fields (moves, inc, sched, …) are ignored: this endpoint stores troops-in-towns only.
  */
 export const GG_VERSION = 1;
@@ -67,7 +67,7 @@ export function sanitizeName(s: unknown, max: number): string {
   return s.replace(NAME_STRIP, '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
-/** Whole positive counts, GrepoGod `frInUnits` rules: known-looking unit ids only. */
+/** Whole positive counts: known-looking unit ids only. */
 export function cleanUnitMap(u: unknown): UnitMap | null {
   if (!u || typeof u !== 'object' || Array.isArray(u)) return null;
   const keys = Object.keys(u);
@@ -84,7 +84,7 @@ export function cleanUnitMap(u: unknown): UnitMap | null {
 const intIn = (v: unknown, min: number, max: number): number | null =>
   (typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max) ? v : null;
 
-/** Warehouse stocks; omit the whole object when GrepoGod's shRes switch is off. */
+/** Warehouse stocks; the client omits the whole object when resource sharing is off. */
 export function cleanRes(raw: unknown): GgRes | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
@@ -102,7 +102,7 @@ export function cleanRes(raw: unknown): GgRes | null {
   return out;
 }
 
-/** Active spells; omit the array when GrepoGod's shSp switch is off. A non-string `name` is dropped, never stringified. */
+/** Active spells; the client omits the array when spell sharing is off. A non-string `name` is dropped, never stringified. */
 export function cleanSpells(raw: unknown): GgSpell[] | null {
   if (!Array.isArray(raw) || raw.length > GG_LIMITS.spells) return null;
   const out: GgSpell[] = [];
@@ -223,7 +223,7 @@ export function totalUnits(players: GgPlayerSnap[], field: UnitField = 'total'):
   return m;
 }
 
-/** Compact town-card height, and expanded height used by the 2-column Friends-style grid. */
+/** Compact town-card height, and expanded height used by the 2-column town grid. */
 export function townH(t: GgTown, open: boolean): number {
   const TH = 56, HEAD = 52, ROW = 58, RES_H = 100, SPELL_BASE = 36, SPELL_LINE = 26;
   if (!open) return TH;

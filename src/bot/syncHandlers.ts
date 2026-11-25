@@ -1,4 +1,4 @@
-/** /grepogod link|unlink: issue or revoke a private per-user key for the GrepoGod userscript. */
+/** /sync link|unlink: issue or revoke a private per-user key for an external data-sync client. */
 import { MessageFlags, type ChatInputCommandInteraction } from 'discord.js';
 import { config } from '../config.js';
 import { UserError } from '../gdServices.js';
@@ -8,7 +8,7 @@ import { GgService } from '../web/ggTroops.js';
 
 const COLOR = 0x5865f2;
 
-export async function handleGrepoGod(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
+export async function handleSync(ctx: Ctx, i: ChatInputCommandInteraction, lang: Lang) {
   if (!i.guildId) throw new UserError('err.guildOnly');
   const sub = i.options.getSubcommand();
   const gg = new GgService(ctx.store);

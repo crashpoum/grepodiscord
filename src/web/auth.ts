@@ -7,7 +7,8 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import type { Store } from '../db.js';
 
-export interface WebSession { u: string; g: string; exp: number; n?: string; k?: 'link' | 'oauth' | 'activity' }
+/** `k: 'guest'` = read-only expiring guest link (live + map only), `j` = its id (revocable). */
+export interface WebSession { u: string; g: string; exp: number; n?: string; k?: 'link' | 'oauth' | 'activity' | 'guest'; j?: string }
 
 const b64 = (b: Buffer | string) => Buffer.from(b).toString('base64url');
 

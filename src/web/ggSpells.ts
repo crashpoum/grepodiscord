@@ -89,14 +89,14 @@ const EL: Record<string, string> = {
 
 export const SPELL_NAMES = { en: EN, el: EL } as const;
 
-/** Compact count like GrepoGod `frK`: 15000 → "15k", 18600 → "18.6k", 3000 → "3k". */
+/** Compact count: 15000 → "15k", 18600 → "18.6k", 3000 → "3k". */
 export function fmtK(n: number): string {
   const x = Math.round(Number(n) || 0);
   if (x >= 1000) return (x / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
   return String(x);
 }
 
-/** `HH:MM:SS` remaining, same shape as GrepoGod `fmtDur`. */
+/** `HH:MM:SS` remaining. */
 export function fmtDur(sec: number): string {
   const s = Math.max(0, Math.round(sec));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;

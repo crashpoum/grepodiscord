@@ -15,7 +15,8 @@ import { classifyError, logError, safeEmbed } from './errors.js';
 import { handleOp, handleAlerts, handleWarroom, opAutocomplete } from './opsHandlers.js';
 import { handleQuitRisk, radarSoft } from './insights.js';
 import { handleLiveMap } from './webHandlers.js';
-import { handleGrepoGod } from './ggHandlers.js';
+import { handleSync } from './syncHandlers.js';
+import { handleActivity, handleAdminCmd, handleIam } from './iamHandlers.js';
 import { handleNewspaper, handleReport } from './aiHandlers.js';
 
 const COLOR_OK = 0x57f287;
@@ -70,6 +71,8 @@ export async function handleAutocomplete(ctx: Ctx, i: AutocompleteInteraction) {
 // ---------------------------------------------------------------- commands
 export async function handleCommand(ctx: Ctx, i: ChatInputCommandInteraction) {
   const lang = guildLang(ctx, i.guildId);
+  // Remember display names of members who use the bot (nickname → player suggestions without the members intent).
+  if (i.guildId && i.member && 'displayName' in i.member) { try { ctx.store.seeMember(i.guildId, i.user.id, String(i.member.displayName), Date.now()); } catch { /* best effort */ } }
   try {
     switch (i.commandName) {
       case 'help': return void (await i.reply({ embeds: [{ title: t(lang, 'help.title'), description: t(lang, 'help.body'), color: 0x5865f2 }], flags: MessageFlags.Ephemeral }));
@@ -85,7 +88,13 @@ export async function handleCommand(ctx: Ctx, i: ChatInputCommandInteraction) {
       case 'op': return await handleOp(ctx, i, lang);
       case 'report': return await handleReport(ctx, i, lang);
       case 'newspaper': return await handleNewspaper(ctx, i, lang);
-      case 'grepogod': return await handleGrepoGod(ctx, i, lang);
+      case 'sync': return await handleSync(ctx, i, lang);
+      case 'admin': return await handleAdminCmd(ctx, i, lang);
+      case 'iam': case 'activity': {
+        const world = await requireWorld(ctx, i, lang);
+        if (!world) return;
+        return i.commandName === 'iam' ? await handleIam(ctx, i, lang, world) : await handleActivity(ctx, i, lang, world);
+      }
       case 'live': case 'map': {
         const world = await requireWorld(ctx, i, lang);
         if (!world) return;

@@ -7,6 +7,7 @@ import type { Ctx } from '../services.js';
 import { LINK_HOURS, webSecret } from '../web/auth.js';
 import { dashboardLink } from '../web/server.js';
 import { activityState, refreshIfStale } from '../web/activityCheck.js';
+import { liveSummary, refreshButton } from './iamHandlers.js';
 
 export type WebTab = 'live' | 'map';
 
@@ -71,7 +72,10 @@ export async function handleLiveMap(ctx: Ctx, i: ChatInputCommandInteraction, la
     activity && browser ? t(lang, 'web.body.limit') : '',
   ].filter(Boolean);
   const embed: APIEmbed = { title, description: body.join('\n\n'), color: 0x5865f2 };
-  await i.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
+  // /live: a live summary from the shared cache plus a Refresh now button (10 s cooldown per server).
+  const summary = tab === 'live' ? await liveSummary(ctx, i.guildId, lang).catch(() => null) : null;
+  if (summary) row.addComponents(refreshButton(lang));
+  await i.reply({ embeds: summary ? [embed, summary as APIEmbed] : [embed], components: [row], flags: MessageFlags.Ephemeral });
 }
 
 /** "Open in browser" on a shared post: a private, personal link for whoever clicked. */

@@ -40,6 +40,8 @@ export class MarksService {
     if (r === undefined) { r = this.now(); this.revs.set(k, r); } // restart-safe: a fresh number after a restart
     return r;
   }
+  /** Force every viewer to reload the shapes (admin "clear all"). */
+  touch(guildId: string, world: string) { this.bump(guildId, world); }
   private bump(guildId: string, world: string) { const k = `${guildId}:${world}`; this.revs.set(k, Math.max(this.now(), (this.revs.get(k) ?? 0) + 1)); }
 
   async isManager(guildId: string, userId: string): Promise<boolean> {

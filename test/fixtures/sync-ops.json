@@ -1,0 +1,71 @@
+{
+  "v": 1,
+  "world": "gr125",
+  "player_id": 7,
+  "player_name": "crashpoum99",
+  "ts": 1795566386656,
+  "ops": [
+    {
+      "id": "cfail1",
+      "kind": "attack",
+      "from_town_id": 11,
+      "from_town_n": "Akropolis",
+      "target_town_id": 58,
+      "target_town_n": "Missed",
+      "send_at": 1795566226,
+      "status": "failed",
+      "units": {
+        "archer": 10
+      },
+      "arrive_at": 1795566286,
+      "reason": "the window had passed"
+    },
+    {
+      "id": "csent1",
+      "kind": "attack",
+      "from_town_id": 11,
+      "from_town_n": "Akropolis",
+      "target_town_id": 57,
+      "target_town_n": "HitTown",
+      "send_at": 1795566576,
+      "status": "sent",
+      "units": {
+        "sword": 80
+      },
+      "arrive_at": 1795567386,
+      "sent_at": 1795566382,
+      "arrival": 1795566586
+    },
+    {
+      "id": "csup1",
+      "kind": "support",
+      "from_town_id": 12,
+      "from_town_n": "Sparti",
+      "target_town_id": 56,
+      "target_town_n": "HelpMe",
+      "send_at": 1795569376,
+      "status": "scheduled",
+      "target_player": "FriendJoe",
+      "units": {
+        "bireme": 10
+      },
+      "arrive_at": 1795571386
+    },
+    {
+      "id": "cpend1",
+      "kind": "attack",
+      "from_town_id": 11,
+      "from_town_n": "Akropolis",
+      "target_town_id": 55,
+      "target_town_n": "TargetHold",
+      "send_at": 1795569976,
+      "status": "scheduled",
+      "target_player": "EnemyKing",
+      "units": {
+        "hoplite": 200,
+        "slinger": 50
+      },
+      "arrive_at": 1795573586
+    }
+  ]
+}

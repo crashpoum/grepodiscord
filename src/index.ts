@@ -14,6 +14,11 @@ import { Gemini } from './ai/gemini.js';
 import { handleReportContext, handleReportModal } from './bot/aiHandlers.js';
 import { startWebServer } from './web/server.js';
 import { handleWebButton, OPEN_PREFIX } from './bot/webHandlers.js';
+import { handleIamButton, handleLiveRefresh, IAM_PREFIX, LIVE_REFRESH } from './bot/iamHandlers.js';
+import { noteError, runtime } from './bridge.js';
+import { sinks } from './log.js';
+import { syncGuildRoles } from './bot/poster.js';
+import { ChannelType, Routes } from 'discord.js';
 
 if (!config.discordToken) {
   console.error('DISCORD_TOKEN is not set. For a token-free dry run use: npm run cli -- --help');
@@ -57,6 +62,55 @@ const web = config.webEnabled
   })
   : null;
 if (!web) log.info('web: live window disabled (set PUBLIC_URL and/or ACTIVITY_CLIENT_ID to enable)');
+sinks.push((line) => noteError(line));
+if (web) { runtime.hub = web.hub; runtime.admin = web.admin; runtime.gg = web.gg; }
+if (!config.ownerUserIds.length) log.info('admin panel: OWNER_USER_ID not set, nobody can open /admin yet');
+
+// Discord bridge for the web app and trackers (REST lookups only; no privileged gateway intents).
+runtime.bridge = {
+  async post(channelId, payload) {
+    const ch = await client.channels.fetch(channelId);
+    if (!ch || !ch.isTextBased() || !('send' in ch)) throw new Error('not a text channel');
+    const m = await ch.send(payload as never);
+    return m.id;
+  },
+  async edit(channelId, messageId, payload) {
+    try {
+      const ch = await client.channels.fetch(channelId);
+      if (!ch || !ch.isTextBased()) return false;
+      await ch.messages.edit(messageId, payload as never);
+      return true;
+    } catch (e) { if (discordNo(e, [10008, 10003])) return false; throw e; }
+  },
+  async memberRoles(guildId, userId) {
+    const g = client.guilds.cache.get(guildId);
+    if (!g) return null;
+    try { const m = await g.members.fetch({ user: userId, force: false }); return [...m.roles.cache.keys()]; } catch { return null; }
+  },
+  async members(guildId) {
+    // Listing members needs the Server Members intent enabled in the portal; without it Discord refuses and we fall back.
+    try {
+      const rows = (await client.rest.get(Routes.guildMembers(guildId), { query: new URLSearchParams({ limit: '1000' }) })) as { user?: { id: string; username: string; global_name?: string | null; bot?: boolean }; nick?: string | null }[];
+      return rows.filter((r) => r.user && !r.user.bot).map((r) => ({ userId: r.user!.id, name: r.nick || r.user!.global_name || r.user!.username }));
+    } catch { return null; }
+  },
+  channels(guildId) {
+    const g = client.guilds.cache.get(guildId);
+    return g ? [...g.channels.cache.values()].filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement).sort((a, b) => ('position' in a && 'position' in b ? a.position - b.position : 0)).map((c) => ({ id: c.id, name: c.name })) : [];
+  },
+  roles(guildId) {
+    const g = client.guilds.cache.get(guildId);
+    return g ? [...g.roles.cache.values()].filter((r) => r.id !== guildId && !r.managed).sort((a, b) => b.position - a.position).map((r) => ({ id: r.id, name: r.name, color: r.hexColor })) : [];
+  },
+  async userName(guildId, userId) {
+    const g = client.guilds.cache.get(guildId);
+    try { if (g) return (await g.members.fetch({ user: userId, force: false })).displayName; return (await client.users.fetch(userId)).username; } catch { return null; }
+  },
+  async syncRoles(guildId, userIds) {
+    const g = client.guilds.cache.get(guildId);
+    if (g) await syncGuildRoles(ctx, g, userIds);
+  },
+};
 
 client.once(Events.ClientReady, (c) => {
   log.info(`Logged in as ${c.user.tag} in ${c.guilds.cache.size} guild(s); tracking ${store.trackedWorlds().join(', ') || 'no worlds yet'}`);
@@ -70,7 +124,12 @@ client.once(Events.ClientReady, (c) => {
 client.on(Events.InteractionCreate, (i) => {
   if (i.isAutocomplete()) void handleAutocomplete(ctx, i);
   else if (i.isChatInputCommand()) void handleCommand(ctx, i);
-  else if (i.isButton()) void (i.customId.startsWith(OPEN_PREFIX) ? handleWebButton(ctx, i).catch((e) => log.warn(`web button: ${e}`)) : handleButton(ctx, i));
+  else if (i.isButton()) {
+    if (i.customId.startsWith(OPEN_PREFIX)) void handleWebButton(ctx, i).catch((e) => log.warn(`web button: ${e}`));
+    else if (i.customId.startsWith(IAM_PREFIX)) void handleIamButton(ctx, i).catch((e) => log.warn(`iam button: ${e}`));
+    else if (i.customId === LIVE_REFRESH) void handleLiveRefresh(ctx, i).catch((e) => log.warn(`live refresh: ${e}`));
+    else void handleButton(ctx, i);
+  }
   else if (i.isModalSubmit()) void handleReportModal(ctx, i);
   else if (i.isMessageContextMenuCommand()) void handleReportContext(ctx, i);
 });

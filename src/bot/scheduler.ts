@@ -6,6 +6,7 @@ import { runTokenCare } from './tokenCare.js';
 import { recordHistory } from './insights.js';
 import { runNewspapers } from './aiHandlers.js';
 import { postFeedEvents, processPendingVerifications, syncRolesForWorld } from './poster.js';
+import { bumpActivityClock, runAnnouncements, runGhostWatch, runTrackers } from './trackers.js';
 import { rollBaselines, runOpReminders, sendThreatAlerts, updateBoardsForWorld } from './warPoster.js';
 
 /** Polls tracked worlds every REFRESH_MINUTES; files change ~hourly, conditional GETs make no-op polls cheap. */
@@ -17,8 +18,11 @@ export function startScheduler(client: Client, ctx: Ctx): () => void {
     try {
       for (const world of ctx.store.trackedWorlds()) {
         try {
+          const prev = ctx.worlds.get(world);
           const ev = await ctx.worlds.refresh(world);
           if (ev.changedFiles.length === 0) continue;
+          if (ev.changedFiles.includes('players')) { try { bumpActivityClock(ctx, world, ctx.worlds.lastRefreshAt(world) ?? 0); } catch (e) { log.warn(`activity clock ${world}: ${e}`); } }
+          if (ev.changedFiles.includes('towns')) await runGhostWatch(ctx, prev, ev.snapshot).catch((e) => log.warn(`ghost watch ${world}: ${e}`));
           try { recordHistory(ctx, ev.snapshot); } catch (e) { log.warn(`history ${world}: ${e}`); }
           await postFeedEvents(client, ctx, ev);
           if (ev.changedFiles.includes('towns')) await processPendingVerifications(client, ctx, world);
@@ -57,5 +61,11 @@ export function startScheduler(client: Client, ctx: Ctx): () => void {
   };
   const h4 = setInterval(news, 5 * 60_000);
   const t1 = setTimeout(news, 60_000);
-  return () => { clearInterval(h); clearInterval(h2); clearInterval(h3); clearInterval(h4); clearTimeout(t0); clearTimeout(t1); };
+  // Live board + conquest/revolt tracker (edit only when the content changed) and scheduled announcements.
+  let trBusy = false;
+  const tr = () => { if (trBusy) return; trBusy = true; void runTrackers(ctx).catch((e) => log.warn(`trackers failed: ${e}`)).finally(() => { trBusy = false; }); };
+  const h5 = setInterval(tr, 60_000);
+  const t2 = setTimeout(tr, 20_000);
+  const h6 = setInterval(() => void runAnnouncements(ctx).catch((e) => log.warn(`announcements failed: ${e}`)), 30_000);
+  return () => { clearInterval(h); clearInterval(h2); clearInterval(h3); clearInterval(h4); clearInterval(h5); clearInterval(h6); clearTimeout(t0); clearTimeout(t1); clearTimeout(t2); };
 }
